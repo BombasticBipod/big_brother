@@ -25,7 +25,7 @@ def repo(tmp_path: Path):
     (tmp_path / "tests" / "unit").mkdir(parents=True)
     (tmp_path / "src").mkdir()
     (tmp_path / "tests" / "test_a.py").write_text("def test_a(): assert True\n")
-    (tmp_path / "tests" / "unit" / "test_u.py").write_text("u\n")
+    (tmp_path / "tests" / "unit" / "test_u.py").write_text("def test_u(): pass\n")
     (tmp_path / "src" / "a.py").write_text("x = 1\n")
     (tmp_path / ".gitignore").write_text("__pycache__/\n")
     git(tmp_path, "add", "-A")
@@ -204,3 +204,26 @@ def test_custom_tests_dir(repo):
     tamper(repo, "spec/s.py", "tampered\n")
     assert lock.changes() == ["spec/s.py"]
     assert not SuiteLock(repo).is_locked()
+
+
+def test_accept_relocks_when_commit_fails(repo, lock):
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    head = git(repo, "rev-parse", "HEAD")
+    with pytest.raises(subprocess.CalledProcessError):
+        with lock.accept("rejected by hook"):
+            (repo / "tests" / "test_b.py").write_text("b\n")
+    assert git(repo, "rev-parse", "HEAD") == head
+    assert not (repo / "tests" / "test_b.py").exists()
+    assert lock.is_locked()
+    assert lock.changes() == []
+    assert not writable(repo / "tests")
+
+
+def test_pytest_runs_against_locked_suite(repo, lock):
+    import sys
+    result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+                            cwd=repo, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert lock.changes() == []
