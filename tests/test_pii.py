@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from big_brother.pii import load_terms, main, mask, scan_history, scan_text, scan_tree
+from big_brother.pii import (filter_allowed, load_allow, load_terms, main, mask, scan_history,
+                             scan_text, scan_tree)
 
 
 def git(repo: Path, *args: str, env: dict | None = None) -> str:
@@ -160,3 +161,43 @@ def test_main_history_flag(repo, tmp_path_factory):
     empty = tmp_path_factory.mktemp("cfg") / "none.txt"
     assert main([str(repo), "--terms", str(empty)]) == 0
     assert main([str(repo), "--terms", str(empty), "--history"]) == 1
+
+
+# reviewed false positives
+
+def test_load_allow_parses_kind_and_match(tmp_path):
+    f = tmp_path / ".pii-allow"
+    f.write_text("# reviewed\n\nemail n@pytest.fixture\nphone 555 010 0000\n")  # pii: fake
+    assert load_allow(f) == {("email", "n@pytest.fixture"), ("phone", "555 010 0000")}  # pii: fake
+
+
+def test_load_allow_missing_file_is_empty(tmp_path):
+    assert load_allow(tmp_path / "none") == set()
+
+
+def test_load_allow_rejects_malformed_lines(tmp_path):
+    f = tmp_path / ".pii-allow"
+    f.write_text("email\n")
+    with pytest.raises(ValueError, match="line 1"):
+        load_allow(f)
+
+
+def test_filter_allowed_drops_exact_kind_and_match_only():
+    found = scan_text("n@pytest.fixture and m@pytest.fixture")  # pii: fake
+    kept = filter_allowed(found, {("email", "n@pytest.fixture"), ("phone", "m@pytest.fixture")})  # pii: fake
+    assert [f.match for f in kept] == ["m@pytest.fixture"]  # pii: fake
+
+
+def test_denylist_terms_can_never_be_allowed():
+    found = scan_text("alice", terms=["alice"])
+    assert filter_allowed(found, {("term", "alice")}) == found
+
+
+def test_main_reads_allow_file_from_repo(repo, tmp_path_factory, capsys):
+    empty = tmp_path_factory.mktemp("cfg") / "none.txt"
+    (repo / "notes.md").write_text("report n@pytest.fixture\n")
+    assert main([str(repo), "--terms", str(empty)]) == 1
+    (repo / ".pii-allow").write_text("email n@pytest.fixture\n")
+    assert main([str(repo), "--terms", str(empty)]) == 0
+    # notes.md plus the entry in .pii-allow itself, which is scanned like any file
+    assert "0 finding(s), 2 allowed" in capsys.readouterr().out
