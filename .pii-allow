@@ -1,0 +1,5 @@
+# Findings reviewed as not PII. One "<kind> <exact match>" per line.
+# Denylist terms can never be allowed. Add an entry only after checking it by hand.
+
+# Commit e2466f0 describes the detector bug it fixed by quoting the false match.
+email n@pytest.fixture

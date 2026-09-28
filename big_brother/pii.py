@@ -10,7 +10,10 @@ author, committer and message, and every blob reachable from any ref. Output
 masks each match so the report does not repeat the data it found. A line that
 contains the marker `pii: fake` is skipped, for made-up data in tests.
 
-Usage: python -m big_brother.pii [REPO] [--terms FILE] [--history]
+Findings reviewed as not PII go in the tracked file `.pii-allow` at the repo
+root, one `<kind> <exact match>` per line. Denylist terms can never be allowed.
+
+Usage: python -m big_brother.pii [REPO] [--terms FILE] [--history] [--allow FILE]
 """
 from __future__ import annotations
 
@@ -18,10 +21,12 @@ import argparse
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_TERMS = Path.home() / ".config" / "big_brother" / "pii_terms.txt"
+ALLOW_FILE = ".pii-allow"
 
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 PHONE = re.compile(r"(?<![\w.+])(?:\+1[ .-]?)?(?:\(\d{3}\) ?|\d{3}[ .-])\d{3}[ .-]\d{4}(?![\w.])")
@@ -47,7 +52,7 @@ def _safe_email(email: str) -> bool:
     return any(domain == d or domain.endswith("." + d) for d in PLACEHOLDER_DOMAINS)
 
 
-def scan_text(text: str, terms: list[str] = (), path: str = "") -> list[Finding]:
+def scan_text(text: str, terms: Sequence[str] = (), path: str = "") -> list[Finding]:
     term_res = [re.compile(r"(?<![A-Za-z0-9])" + re.escape(t) + r"(?![A-Za-z0-9])", re.I)
                 for t in terms]
     found = []
@@ -55,8 +60,11 @@ def scan_text(text: str, terms: list[str] = (), path: str = "") -> list[Finding]
         if FAKE_MARKER in line:
             continue
         for m in EMAIL.finditer(line):
-            if not _safe_email(m.group()):
-                found.append(Finding(path, n, "email", m.group(), m.start()))
+            email, col = m.group(), m.start()
+            if col and line[col - 1] == "\\":  # "\n@x" in source is an escape, not an address
+                email, col = email[1:], col + 1
+            if not email.startswith("@") and not _safe_email(email):
+                found.append(Finding(path, n, "email", email, col))
         for m in PHONE.finditer(line):
             found.append(Finding(path, n, "phone", m.group(), m.start()))
         for m in HOME.finditer(line):
@@ -83,6 +91,29 @@ def load_terms(path: Path | str) -> list[str]:
     return [s.strip() for s in lines if s.strip() and not s.strip().startswith("#")]
 
 
+def load_allow(path: Path | str) -> set[tuple[str, str]]:
+    """Read reviewed false positives: one `<kind> <exact match>` per line."""
+    try:
+        lines = Path(path).read_text().splitlines()
+    except FileNotFoundError:
+        return set()
+    allowed = set()
+    for n, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        kind, _, match = line.partition(" ")
+        if not match.strip():
+            raise ValueError(f"{path}: line {n}: expected '<kind> <match>'")
+        allowed.add((kind, match.strip()))
+    return allowed
+
+
+def filter_allowed(found: list[Finding], allowed: set[tuple[str, str]]) -> list[Finding]:
+    """Drop findings reviewed as not PII. Denylist terms are never dropped."""
+    return [f for f in found if f.kind == "term" or (f.kind, f.match) not in allowed]
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True,
                           capture_output=True, text=True).stdout
@@ -97,7 +128,7 @@ def _decode(data: bytes) -> str | None:
         return None
 
 
-def scan_tree(repo: Path | str, terms: list[str] = ()) -> list[Finding]:
+def scan_tree(repo: Path | str, terms: Sequence[str] = ()) -> list[Finding]:
     """Scan tracked and untracked, non-ignored files in the working tree."""
     repo = Path(repo)
     found = []
@@ -111,7 +142,7 @@ def scan_tree(repo: Path | str, terms: list[str] = ()) -> list[Finding]:
     return found
 
 
-def scan_history(repo: Path | str, terms: list[str] = ()) -> list[Finding]:
+def scan_history(repo: Path | str, terms: Sequence[str] = ()) -> list[Finding]:
     """Scan commit metadata and every blob reachable from any ref."""
     repo = Path(repo)
     found = []
@@ -141,14 +172,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("repo", nargs="?", default=".")
     parser.add_argument("--terms", default=str(DEFAULT_TERMS), help="denylist file, one term per line")
     parser.add_argument("--history", action="store_true", help="also scan all commits and blobs")
+    parser.add_argument("--allow", help=f"reviewed false positives (default: REPO/{ALLOW_FILE})")
     args = parser.parse_args(argv)
     terms = load_terms(args.terms)
-    found = scan_tree(args.repo, terms)
+    allowed = load_allow(args.allow or Path(args.repo) / ALLOW_FILE)
+    raw = scan_tree(args.repo, terms)
     if args.history:
-        found += scan_history(args.repo, terms)
+        raw += scan_history(args.repo, terms)
+    found = filter_allowed(raw, allowed)
     for f in found:
         print(f"{f.path}:{f.line}: {f.kind} {mask(f.match)}")
-    print(f"{len(found)} finding(s), {len(terms)} denylist term(s)")
+    print(f"{len(found)} finding(s), {len(raw) - len(found)} allowed, {len(terms)} denylist term(s)")
     return 1 if found else 0
 
 
