@@ -35,6 +35,15 @@ def test_allowlisted_emails_pass(safe):
     assert scan_text(f"x {safe} y") == []
 
 
+def test_escaped_newline_before_decorator_is_not_an_email():
+    assert scan_text(r'"import pytest\n@pytest.fixture\ndef f(): ..."') == []
+
+
+def test_email_after_escape_sequence_is_still_found():
+    found = scan_text(r'"name:\tjane@gmail.com"')  # pii: fake
+    assert [f.match for f in found] == ["jane@gmail.com"]  # pii: fake
+
+
 @pytest.mark.parametrize("phone", ["(989) 555-0142", "989-555-0142", "989.555.0142",  # pii: fake
                                    "+1 989 555 0142"])  # pii: fake
 def test_finds_phone_numbers(phone):

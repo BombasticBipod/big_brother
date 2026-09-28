@@ -18,6 +18,7 @@ import argparse
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def _safe_email(email: str) -> bool:
     return any(domain == d or domain.endswith("." + d) for d in PLACEHOLDER_DOMAINS)
 
 
-def scan_text(text: str, terms: list[str] = (), path: str = "") -> list[Finding]:
+def scan_text(text: str, terms: Sequence[str] = (), path: str = "") -> list[Finding]:
     term_res = [re.compile(r"(?<![A-Za-z0-9])" + re.escape(t) + r"(?![A-Za-z0-9])", re.I)
                 for t in terms]
     found = []
@@ -55,8 +56,11 @@ def scan_text(text: str, terms: list[str] = (), path: str = "") -> list[Finding]
         if FAKE_MARKER in line:
             continue
         for m in EMAIL.finditer(line):
-            if not _safe_email(m.group()):
-                found.append(Finding(path, n, "email", m.group(), m.start()))
+            email, col = m.group(), m.start()
+            if col and line[col - 1] == "\\":  # "\n@x" in source is an escape, not an address
+                email, col = email[1:], col + 1
+            if not email.startswith("@") and not _safe_email(email):
+                found.append(Finding(path, n, "email", email, col))
         for m in PHONE.finditer(line):
             found.append(Finding(path, n, "phone", m.group(), m.start()))
         for m in HOME.finditer(line):
@@ -97,7 +101,7 @@ def _decode(data: bytes) -> str | None:
         return None
 
 
-def scan_tree(repo: Path | str, terms: list[str] = ()) -> list[Finding]:
+def scan_tree(repo: Path | str, terms: Sequence[str] = ()) -> list[Finding]:
     """Scan tracked and untracked, non-ignored files in the working tree."""
     repo = Path(repo)
     found = []
@@ -111,7 +115,7 @@ def scan_tree(repo: Path | str, terms: list[str] = ()) -> list[Finding]:
     return found
 
 
-def scan_history(repo: Path | str, terms: list[str] = ()) -> list[Finding]:
+def scan_history(repo: Path | str, terms: Sequence[str] = ()) -> list[Finding]:
     """Scan commit metadata and every blob reachable from any ref."""
     repo = Path(repo)
     found = []
