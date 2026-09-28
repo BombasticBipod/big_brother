@@ -16,7 +16,8 @@ With one machine there is no second copy of anything. The filesystem is the shar
 On one filesystem nothing physically stops either side touching the other's files, so enforcement is deliberate:
 
 - Claude Code must not read the target project's `src/`. The rule goes in the target's `CLAUDE.md` and in Claude Code permission deny rules (`Read(src/**)`), so it is enforced rather than requested.
-- The builder must never write `tests/`. The builder only writes inside `src/`, and after every iteration the **test lock** checks `tests/` against the commit recorded at the start of the build. Any change aborts the run and reverts `tests/`.
+- The builder must never write `tests/`. The **suite lock** keeps `tests/` locked at all times, not only during builds: the files and directories are read-only on disk, and the locked commit is recorded in `.git/big_brother/suite_lock.json`. The only way to change tests is `accept(message)`, which unlocks, lets the test writer edit, commits only `tests/` and locks again at the new commit. If the writer fails partway, its edits are discarded and the old suite stays locked.
+- Read-only permissions stop accidental writes, not a process that chmods its way in, so after every builder iteration the lock also compares `tests/` with the locked commit (modified, added, deleted, staged or committed). Any change aborts the run and reverts `tests/`.
 - Runs take turns, never overlap: `build()` holds a lock so tests cannot change mid-run.
 
 Note: these rules apply to the *target* project that big_brother drives, not to big_brother's own source in `big_brother/`.
@@ -40,7 +41,7 @@ Claude Code's cycle: pick a requirement, write a test, confirm red, commit, buil
 
 ## Build order
 
-1. Test lock: detect and revert any change to `tests/` during a build.
+1. Suite lock: `tests/` locked at all times, unlocked only to accept committed changes; tampering detected and reverted. (Done.)
 2. Red check: stub generation and confirming new tests fail correctly.
 3. Builder loop: pytest plus Ollama, max tries, green or stuck result.
 4. Feedback: coverage and mutmut summaries under a size budget.
