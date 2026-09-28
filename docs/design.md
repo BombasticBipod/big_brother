@@ -22,6 +22,16 @@ On one filesystem nothing physically stops either side touching the other's file
 
 Note: these rules apply to the *target* project that big_brother drives, not to big_brother's own source in `big_brother/`.
 
+## Interface and red check
+
+A target project's `interface/` holds `.pyi` files (signatures, docstrings, classes, constants) written by the test writer. The interface is contract, like `tests/`: the builder must not write it. The suite lock guards one directory today and `accept()` commits only that directory, so before step 6 the lock must cover `interface/` and `tests/` together, because the test writer changes them together.
+
+`make_stubs` turns each `.pyi` into a module whose function bodies raise `NotImplementedError("<qualified name>")`. `red_check` copies `tests/` and the stubs into a temporary directory and runs only the named test files there, with a clean environment (`PYTHONPATH` set to the stubs only, no inherited pytest options, no root conftest or pytest config from the target). The real `src/` is never importable, so a test cannot pass by reaching real code and no implementation text reaches the result. Only exception types and one-line messages are recorded, never tracebacks.
+
+Verdicts: **red** (failed with `NotImplementedError` or `AssertionError`, in setup or call), **passes_on_stubs** (the test asks for no behavior), **broken** (collection error, wrong exception, skip, timeout, no tests). The summary is capped at 500 characters.
+
+Limits: red against stubs is automatic for any test that calls the interface, even when the real implementation already satisfies it. Only a build shows whether a new test asks for new behavior. Target tests run on big_brother's own Python interpreter, so a target's own dependencies are not installed there; that is fine for the step 7 toy project and must be revisited for real targets.
+
 ## Feedback
 
 Red check, coverage and mutation testing (mutmut) all run locally at no token cost. Claude Code only sees short summaries: gaps and surviving mutants.
@@ -42,7 +52,7 @@ Claude Code's cycle: pick a requirement, write a test, confirm red, commit, buil
 ## Build order
 
 1. Suite lock: `tests/` locked at all times, unlocked only to accept committed changes; tampering detected and reverted. (Done.)
-2. Red check: stub generation and confirming new tests fail correctly.
+2. Red check: stub generation and confirming new tests fail correctly. (Done.)
 3. Builder loop: pytest plus Ollama, max tries, green or stuck result.
 4. Feedback: coverage and mutmut summaries under a size budget.
 5. Requirements ledger in SQLite.
