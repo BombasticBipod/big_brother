@@ -17,3 +17,6 @@ packages = ["big_brother"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tests that need the real local model are opt-in: uv run pytest -m ollama
+addopts = ["-m", "not ollama"]
+markers = ["ollama: needs the local Ollama server and the builder model (starts it on demand)"]

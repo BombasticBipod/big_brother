@@ -86,6 +86,18 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
+def fit(prefix: str, lines: list[str], budget: int = SUMMARY_BUDGET) -> str:
+    """Join lines after prefix with "; ", ending with "(+N more)" where the budget runs out."""
+    out = prefix
+    for i, line in enumerate(lines):
+        more = f" (+{len(lines) - i} more)"
+        piece = ("; " if i else "") + line
+        if len(out) + len(piece) + len(more) > budget:
+            return out + more
+        out += piece
+    return out
+
+
 def _summarize(status: str, tests: list[TestOutcome], note: str = "") -> str:
     if status == "red":
         n = len(tests)
@@ -101,14 +113,7 @@ def _summarize(status: str, tests: list[TestOutcome], note: str = "") -> str:
             lines.append(f"{t.nodeid} passed against stubs")
         else:
             lines.append(_clip(f"{t.nodeid} [{t.when}] {t.exc_type}: {t.message}", MESSAGE_BUDGET))
-    out = f"{status}: "
-    for i, line in enumerate(lines):
-        more = f" (+{len(lines) - i} more)"
-        piece = ("; " if i else "") + line
-        if len(out) + len(piece) + len(more) > SUMMARY_BUDGET:
-            return out + more
-        out += piece
-    return out
+    return fit(f"{status}: ", lines)
 
 
 def red_check(repo: Path | str, test_paths: list[str], interface_dir: str = "interface",
