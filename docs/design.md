@@ -30,7 +30,7 @@ A target project's `interface/` holds `.pyi` files (signatures, docstrings, clas
 
 Verdicts: **red** (failed with `NotImplementedError` or `AssertionError`, in setup or call), **passes_on_stubs** (the test asks for no behavior), **broken** (collection error, wrong exception, skip, timeout, no tests). The summary is capped at 500 characters.
 
-Limits: red against stubs is automatic for any test that calls the interface, even when the real implementation already satisfies it. Only a build shows whether a new test asks for new behavior. Target tests run on big_brother's own Python interpreter, so a target's own dependencies are not installed there; that is fine for the step 7 toy project and must be revisited for real targets.
+Limits: red against stubs is automatic for any test that calls the interface, even when the real implementation already satisfies it. Only a build shows whether a new test asks for new behavior. Target tests run on big_brother's own Python interpreter, so a target's own dependencies are not installed there; that is fine for the step 7 toy project and must be revisited for real targets. `shutil.copytree` follows symlinks, so a symlink in `tests/` pointing into `src/` would copy real source into the check; step 6's `propose_test` must refuse symlinks.
 
 ## Feedback
 
