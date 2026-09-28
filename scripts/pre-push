@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Block a push when the working tree or any reachable commit contains PII.
+# Install: ln -sf ../../scripts/pre-push .git/hooks/pre-push
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+exec uv run python -m big_brother.pii . --history

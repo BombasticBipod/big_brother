@@ -1,0 +1,6 @@
+# Copy to ~/.config/big_brother/pii_terms.txt and list your own names,
+# usernames, hostnames and handles, one per line. Matching is whole-word and
+# case-insensitive. Keep the real file out of every repository.
+jane
+doe
+my-laptop
