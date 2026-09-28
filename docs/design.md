@@ -32,6 +32,16 @@ Verdicts: **red** (failed with `NotImplementedError` or `AssertionError`, in set
 
 Limits: red against stubs is automatic for any test that calls the interface, even when the real implementation already satisfies it. Only a build shows whether a new test asks for new behavior. Target tests run on big_brother's own Python interpreter, so a target's own dependencies are not installed there; that is fine for the step 7 toy project and must be revisited for real targets. `shutil.copytree` follows symlinks, so a symlink in `tests/` pointing into `src/` would copy real source into the check; step 6's `propose_test` must refuse symlinks.
 
+## Builder loop
+
+`build(repo, model, max_tries)` refuses to start unless the suite is locked and `src/` is fully committed, and holds a run lock (`flock` on `.git/big_brother/build.lock`) for its whole length. `accept()` takes the same lock, so tests never change mid-build. Each try sends the model the interface, the current source, the failing test files and the tail of the pytest output. It then writes back only the files the reply names that the interface declares: `src/<module>.py` for each `interface/<module>.pyi`. Any other path is refused and reported back to the model. Tests run with `PYTHONPATH` set to `src/`, which comes before site-packages, so without this rule a reply could plant `src/pytest.py` or `src/sitecustomize.py` and fake a green run. The suite lock is enforced after the writes and again after the test run, so green always comes from the locked tests.
+
+Green commits `src/` only. Stuck, or any exception (model error, interrupt, tampering), restores `src/` to HEAD.
+
+The summary and progress lines go to the test writer, so they carry only counts, test ids and exception types. The one exception is the message of an AssertionError raised in a test file. Any exception raised inside `src/`, including a failed `assert` there or a syntax error, can quote implementation text, so those messages are dropped. Prompts, replies and full pytest output go to `.git/big_brother/build.log`. That log contains implementation text, so step 8 must deny reads of it as well as `src/`.
+
+The model call always sets `num_ctx`, because a server default that is too small silently cuts the front of the prompt, where the format rules are. Ollama is started for the build and stopped at the end if the build started it. Tests use a fake model. The real-model check is opt-in (`uv run pytest -m ollama`) so the default suite passes with Ollama stopped.
+
 ## Feedback
 
 Red check, coverage and mutation testing (mutmut) all run locally at no token cost. Claude Code only sees short summaries: gaps and surviving mutants.
@@ -53,12 +63,12 @@ Claude Code's cycle: pick a requirement, write a test, confirm red, commit, buil
 
 1. Suite lock: `tests/` locked at all times, unlocked only to accept committed changes; tampering detected and reverted. (Done.)
 2. Red check: stub generation and confirming new tests fail correctly. (Done.)
-3. Builder loop: pytest plus Ollama, max tries, green or stuck result.
+3. Builder loop: pytest plus Ollama, max tries, green or stuck result. (Done.)
 4. Feedback: coverage and mutmut summaries under a size budget.
 5. Requirements ledger in SQLite.
 6. MCP server wrapping all of it, with permission tests (writes outside the allowed directory are rejected, results stay under budget).
 7. End to end on one toy requirement.
-8. Claude Code permission settings denying reads of the target's `src/`.
+8. Claude Code permission settings denying reads of the target's `src/` and of `.git/big_brother/build.log`.
 
 ## Operating rules
 

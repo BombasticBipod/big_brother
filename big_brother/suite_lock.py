@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from big_brother.runlock import run_lock
+
 WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
 
 
@@ -133,18 +135,20 @@ class SuiteLock:
         """Unlock for the block, then commit the tests directory and lock again.
 
         If the block or the commit fails, the changes are discarded and the suite stays at
-        the old commit. Tampering found before unlocking is reverted and raised.
+        the old commit. Tampering found before unlocking is reverted and raised. Raises
+        BuildBusy, before unlocking, if a build is running.
         """
-        self.enforce()
-        self._set_writable(True)
-        try:
-            yield
-            _git(self.repo, "add", "-A", "--", self.tests_dir)
-            staged = subprocess.run(["git", "-C", str(self.repo), "diff", "--cached", "--quiet",
-                                     "--", self.tests_dir]).returncode
-            if staged:
-                _git(self.repo, "commit", "-qm", message, "--", self.tests_dir)
-        except BaseException:
-            self._restore()
-            raise
-        self.lock()
+        with run_lock(self.repo):
+            self.enforce()
+            self._set_writable(True)
+            try:
+                yield
+                _git(self.repo, "add", "-A", "--", self.tests_dir)
+                staged = subprocess.run(["git", "-C", str(self.repo), "diff", "--cached",
+                                         "--quiet", "--", self.tests_dir]).returncode
+                if staged:
+                    _git(self.repo, "commit", "-qm", message, "--", self.tests_dir)
+            except BaseException:
+                self._restore()
+                raise
+            self.lock()

@@ -1,7 +1,8 @@
 """pytest plugin used by red_check: record each test phase's outcome as JSON lines.
 
-Only the exception type and its one-line message are recorded, never a
-traceback, so no source code reaches the test writer.
+Only the exception type, its one-line message and the file it was raised in
+are recorded, never a traceback. Callers decide which messages are safe to
+show: one raised in a target's src/ may quote implementation text.
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ def pytest_runtest_makereport(item, call):
             "outcome": report.outcome,
             "exc_type": exc.typename if exc else None,
             "message": _first_line(exc.exconly()) if exc else "",
+            "raised_in": str(exc.traceback[-1].path) if exc and exc.traceback else "",
         })
 
 
@@ -44,4 +46,5 @@ def pytest_collectreport(report):
             "outcome": "error",
             "exc_type": "CollectionError",
             "message": lines[-1] if lines else _first_line(str(report.longrepr)),
+            "raised_in": "",
         })
