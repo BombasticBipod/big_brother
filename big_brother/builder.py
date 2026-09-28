@@ -15,7 +15,7 @@ Green commits src/ only. Stuck, or any exception, restores src/ to HEAD.
 Two audiences, two levels of detail. The summary and the progress lines are
 for the test writer, who must never see implementation text, so they carry
 counts, test ids and exception types, plus the message of an AssertionError
-(which comes from the test). Everything else (prompts, replies, full pytest
+raised in a test file. Everything else (prompts, replies, full pytest
 output) goes to the build log in `.git/big_brother/build.log`, which the test
 writer must not read.
 
@@ -154,9 +154,15 @@ def _run_tests(repo: Path, tests_dir: str, src_dir: str, timeout: float) -> Test
     return TestRun(_outcomes(records), proc.stdout + proc.stderr, proc.returncode)
 
 
-def _line(t: TestOutcome) -> str:
-    # An AssertionError message comes from the test; any other message may quote src/.
-    detail = t.message if t.exc_type == "AssertionError" and t.message else t.exc_type or t.outcome
+def _from_tests(t: TestOutcome, tests_root: Path) -> bool:
+    return bool(t.raised_in) and Path(t.raised_in).resolve().is_relative_to(tests_root.resolve())
+
+
+def _line(t: TestOutcome, tests_root: Path) -> str:
+    # Only an AssertionError raised in a test file is safe to quote; anything raised
+    # in src/, including an assert there, may carry implementation text.
+    safe = t.exc_type == "AssertionError" and t.message and _from_tests(t, tests_root)
+    detail = t.message if safe else t.exc_type or t.outcome
     return _clip(f"{t.nodeid} [{t.when}] {detail}", MESSAGE_BUDGET)
 
 
@@ -164,11 +170,11 @@ def _plural(n: int) -> str:
     return f"{n} try" if n == 1 else f"{n} tries"
 
 
-def _stuck_summary(tries: int, run: TestRun) -> str:
+def _stuck_summary(tries: int, run: TestRun, tests_root: Path) -> str:
     prefix = f"stuck after {_plural(tries)}: "
     if run.returncode is None:
         return prefix + "tests timed out"
-    lines = [_line(t) for t in run.outcomes if t.outcome != "passed"]
+    lines = [_line(t, tests_root) for t in run.outcomes if t.outcome != "passed"]
     return fit(prefix, lines) if lines else prefix + f"pytest exited {run.returncode}"
 
 
@@ -282,7 +288,7 @@ def _loop(repo: Path, model: Model, lock: SuiteLock, log: _Log, max_tries: int, 
             return BuildResult("green", n, f"green after {_plural(n)}: {run.passed} tests pass")
     _restore_src(repo, src_dir)
     log.write("stuck")
-    return BuildResult("stuck", max_tries, _stuck_summary(max_tries, run))
+    return BuildResult("stuck", max_tries, _stuck_summary(max_tries, run, repo / tests_dir))
 
 
 def main(argv: list[str] | None = None, client: Model | None = None,

@@ -47,6 +47,7 @@ class TestOutcome:
     exc_type: str | None
     message: str
     verdict: str
+    raised_in: str = ""   # file the exception was raised in, "" if none or unknown
 
 
 @dataclass(frozen=True)

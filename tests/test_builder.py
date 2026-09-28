@@ -161,7 +161,7 @@ def test_stuck_restores_src_and_reports_failing_tests(target):
     result = run(target, FakeModel(BAD), max_tries=3)
     assert (result.status, result.tries) == ("stuck", 3)
     assert result.summary.startswith("stuck after 3 tries: ")
-    assert "tests/test_calc.py::test_add [call] AssertionError" in result.summary
+    assert "tests/test_calc.py::test_add [call] AssertionError: assert -1 == 5" in result.summary
     assert len(result.summary) <= 500
     assert not (target / "src" / "calc.py").exists()
     assert head(target) == before and git(target, "status", "--porcelain") == ""
@@ -197,6 +197,7 @@ def test_reply_without_files_is_reported_back(target):
     ("def add(a, b):\n    raise ValueError('SECRET_VALUE_MARKER')\n", "SECRET_VALUE_MARKER"),
     ("SECRET_IMPORT_MARKER = 1\nraise RuntimeError(f'{SECRET_IMPORT_MARKER} at import')\n",
      "SECRET_IMPORT_MARKER"),
+    ("def add(a, b):\n    assert False, 'SECRET_ASSERT_MARKER'\n", "SECRET_ASSERT_MARKER"),
 ])
 def test_implementation_text_never_reaches_summary_or_progress(target, body, marker):
     lines: list[str] = []
@@ -238,6 +239,49 @@ def test_model_error_restores_src_and_propagates(target):
     with pytest.raises(OllamaError):
         run(target, model, max_tries=3)
     assert not (target / "src" / "calc.py").exists()
+
+
+def test_assertion_from_src_reports_type_only(target):
+    result = run(target, FakeModel(reply("def add(a, b):\n    assert False, 'x'\n")), max_tries=1)
+    assert result.summary.endswith("::test_add_negative [call] AssertionError")
+
+
+# committed src/
+
+NEW_TEST = "from calc import add\n\n\ndef test_add_zero():\n    assert add(0, 0) == 1\n"
+
+
+@pytest.fixture
+def built(target: Path) -> Path:
+    assert run(target, FakeModel(GOOD)).status == "green"
+    with SuiteLock(target).accept("impossible test"):
+        (target / "tests" / "test_zero.py").write_text(NEW_TEST)
+    return target
+
+
+def test_stuck_keeps_the_committed_src(built):
+    before = head(built)
+    committed = (built / "src" / "calc.py").read_text()
+    result = run(built, FakeModel(BAD), max_tries=2)
+    assert result.status == "stuck"
+    assert (built / "src" / "calc.py").read_text() == committed
+    assert head(built) == before and git(built, "status", "--porcelain") == ""
+
+
+def test_model_error_keeps_the_committed_src(built):
+    before = head(built)
+    committed = (built / "src" / "calc.py").read_text()
+    model = FakeModel(BAD)
+
+    def second_call_fails():
+        if len(model.prompts) == 2:
+            raise OllamaError("down")
+
+    model.before = second_call_fails
+    with pytest.raises(OllamaError):
+        run(built, model, max_tries=3)
+    assert (built / "src" / "calc.py").read_text() == committed
+    assert head(built) == before and git(built, "status", "--porcelain") == ""
 
 
 # preconditions
