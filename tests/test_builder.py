@@ -10,6 +10,7 @@ from big_brother.builder import (BuildResult, DirtySrc, allowed_paths, build, bu
                                  main, parse_reply)
 from big_brother.ollama import OllamaError
 from big_brother.runlock import BuildBusy, run_lock
+from big_brother.staging import StagingError
 from big_brother.suite_lock import NotLocked, SuiteLock, TestsTampered
 
 INTERFACE = '''def add(a: int, b: int) -> int:
@@ -115,9 +116,10 @@ def test_parse_reply_ignores_a_lone_block_when_several_files_are_declared():
 
 
 def test_allowed_paths_follow_the_interface(target):
-    (target / "interface" / "pkg").mkdir()
-    (target / "interface" / "pkg" / "__init__.pyi").write_text("")
-    (target / "interface" / "pkg" / "util.pyi").write_text("X: int\n")
+    with SuiteLock(target).accept("add pkg"):   # the interface is locked with the tests
+        (target / "interface" / "pkg").mkdir()
+        (target / "interface" / "pkg" / "__init__.pyi").write_text("")
+        (target / "interface" / "pkg" / "util.pyi").write_text("X: int\n")
     assert allowed_paths(target) == {"src/calc.py", "src/pkg/__init__.py", "src/pkg/util.py"}
 
 
@@ -226,6 +228,64 @@ def test_tampering_during_a_try_aborts_and_restores_everything(target):
     assert test_file.read_text() == TESTS
     assert not (target / "src" / "calc.py").exists()
     assert head(target) == before
+
+
+# code under build cannot reach big_brother's own state
+
+def plant(code: str) -> str:
+    """A reply whose module-level code runs during the test run, then implements add."""
+    return reply(code + "\n\ndef add(a, b):\n    return a + b\n")
+
+
+def test_code_under_build_does_not_run_inside_the_target(target):
+    code = ("import os, pathlib\n"
+            "p = pathlib.Path('.git/big_brother/staged/tests/test_evil.py')\n"
+            "p.parent.mkdir(parents=True, exist_ok=True)\n"
+            "p.write_text('def test_evil():\\n    assert False\\n')\n"
+            "pathlib.Path('marker_from_build').write_text('x')\n")
+    result = run(target, FakeModel(plant(code)))
+    assert result.status == "green"
+    assert not (target / ".git" / "big_brother" / "staged").exists()
+    assert not (target / "marker_from_build").exists()
+
+
+def test_rewriting_the_lock_state_during_a_build_is_caught(target):
+    state = target / ".git" / "big_brother" / "suite_lock.json"
+    test_file = target / "tests" / "test_calc.py"
+    code = ("import json, os, pathlib, subprocess\n"
+            f"repo = {str(target)!r}\n"
+            f"t = pathlib.Path({str(test_file)!r})\n"
+            "os.chmod(t.parent, 0o755); os.chmod(t, 0o644)\n"
+            "t.write_text('def test_add():\\n    pass\\n')\n"
+            "subprocess.run(['git', '-C', repo, 'commit', '-qam', 'weaken'], check=True)\n"
+            "head = subprocess.run(['git', '-C', repo, 'rev-parse', 'HEAD'], check=True,\n"
+            "                      capture_output=True, text=True).stdout.strip()\n"
+            f"pathlib.Path({str(state)!r}).write_text(json.dumps({{'tests': head}}))\n")
+    before = SuiteLock(target).base
+    with pytest.raises(TestsTampered):
+        run(target, FakeModel(plant(code)))
+    assert SuiteLock(target).base == before
+    assert "assert add(2, 3) == 5" in test_file.read_text()
+
+
+def test_staged_files_planted_during_a_build_are_caught_and_wiped(target):
+    staged = target / ".git" / "big_brother" / "staged" / "tests" / "test_evil.py"
+    code = ("import pathlib\n"
+            f"p = pathlib.Path({str(staged)!r})\n"
+            "p.parent.mkdir(parents=True, exist_ok=True)\n"
+            "p.write_text('def test_evil():\\n    assert False\\n')\n")
+    with pytest.raises(TestsTampered):
+        run(target, FakeModel(plant(code)))
+    assert not staged.exists()
+
+
+def test_build_is_refused_while_suite_files_are_staged(target):
+    staged = target / ".git" / "big_brother" / "staged" / "tests" / "test_new.py"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("def test_new():\n    assert False\n")
+    with pytest.raises(StagingError):
+        run(target, FakeModel(GOOD))
+    assert staged.exists()
 
 
 def test_model_error_restores_src_and_propagates(target):

@@ -19,18 +19,21 @@ On one filesystem nothing physically stops either side touching the other's file
 - The builder must never write `tests/`. The **suite lock** keeps `tests/` locked at all times, not only during builds: the files and directories are read-only on disk, and the locked commit is recorded in `.git/big_brother/suite_lock.json`. The only way to change tests is `accept(message)`, which unlocks, lets the test writer edit, commits only `tests/` and locks again at the new commit. If the writer fails partway, its edits are discarded and the old suite stays locked.
 - Read-only permissions stop accidental writes, not a process that chmods its way in, so after every builder iteration the lock also compares `tests/` with the locked commit (modified, added, deleted, staged or committed). Any change aborts the run and reverts `tests/`.
 - Runs take turns, never overlap: `build()` holds a lock so tests cannot change mid-run.
+- Code under build runs with the user's permissions. The builder runs pytest in a temporary copy of `src/` and `tests/` with no `.git`, so relative writes cannot reach the target, its lock state, staged files, ledger or hooks. A temporary copy does not stop deliberate absolute-path writes, so the build also pins the locked commit in memory (a rewritten `suite_lock.json` is restored and reported as tampering), refuses to start while suite files are staged, and treats any staged file that appears during the build as tampering: it is wiped and the build aborts. Full isolation (a sandbox such as bubblewrap) is not built; revisit it before driving untrusted models.
 
 Note: these rules apply to the *target* project that big_brother drives, not to big_brother's own source in `big_brother/`.
 
 ## Interface and red check
 
-A target project's `interface/` holds `.pyi` files (signatures, docstrings, classes, constants) written by the test writer. The interface is contract, like `tests/`: the builder must not write it. The suite lock guards one directory today and `accept()` commits only that directory, so before step 6 the lock must cover `interface/` and `tests/` together, because the test writer changes them together.
+A target project's `interface/` holds `.pyi` files (signatures, docstrings, classes, constants) written by the test writer. The interface is contract, like `tests/`: the builder must not write it. The suite lock covers `interface/` and `tests/` together, and `accept()` commits both, because the test writer changes them together. The lock state still keys the commit by the tests directory, so a lock made before it covered the interface reads as locked and now guards both.
 
 `make_stubs` turns each `.pyi` into a module whose function bodies raise `NotImplementedError("<qualified name>")`. `red_check` copies `tests/` and the stubs into a temporary directory and runs only the named test files there, with a clean environment (`PYTHONPATH` set to the stubs only, no inherited pytest options, no root conftest or pytest config from the target). The real `src/` is never importable, so a test cannot pass by reaching real code and no implementation text reaches the result. Only exception types and one-line messages are recorded, never tracebacks.
 
 Verdicts: **red** (failed with `NotImplementedError` or `AssertionError`, in setup or call), **passes_on_stubs** (the test asks for no behavior), **broken** (collection error, wrong exception, skip, timeout, no tests). The summary is capped at 500 characters.
 
-Limits: red against stubs is automatic for any test that calls the interface, even when the real implementation already satisfies it. Only a build shows whether a new test asks for new behavior. Target tests run on big_brother's own Python interpreter, so a target's own dependencies are not installed there; that is fine for the step 7 toy project and must be revisited for real targets. `shutil.copytree` follows symlinks, so a symlink in `tests/` pointing into `src/` would copy real source into the check; step 6's `propose_test` must refuse symlinks.
+`red_check(overlay=DIR)` lays staged `interface/` and `tests/` files over the committed ones in the throwaway copy. A symlink anywhere in the interface or tests, committed or staged, makes the check broken before anything is copied.
+
+Limits: red against stubs is automatic for any test that calls the interface, even when the real implementation already satisfies it. Only a build shows whether a new test asks for new behavior. Target tests run on big_brother's own Python interpreter, so a target's own dependencies are not installed there; that is fine for the step 7 toy project and must be revisited for real targets.
 
 ## Builder loop
 
@@ -52,7 +55,16 @@ Results are named only by what the interface declares: `calc.sign`, `calc.Counte
 
 mutmut is pinned to 3.8 because the parser reads mutmut's internal mutant names (`<module>.x_<function>__mutmut_<n>`, `<module>.xǁ<Class>ǁ<method>__mutmut_<n>`).
 
-Limit: the interface names are read from the working tree's `interface/`, while `src/` and `tests/` come from HEAD. Once the suite lock covers `interface/` (before step 6), read it from HEAD too.
+The interface names are read from the working tree's `interface/`. That matches the locked commit, because `feedback` enforces the suite lock, which covers `interface/`, before it reads anything.
+
+## Staging
+
+The suite lock unlocks only inside one `accept()` block, but the test writer proposes files over several tool calls. Proposed files wait in `.git/big_brother/staged/`, mirroring their paths, and touch the target only on commit.
+
+- `Staging.propose(path, content)` accepts only `tests/**/*.py` and `interface/**/*.pyi`, refuses paths through a symlink in the target and content over 100,000 characters, then checks everything staged. The writer proposes interface files through the same staging area, so no separate interface tool path is needed.
+- The check runs the red check with the overlay. Staged tests must be red. When an interface file is staged, the committed tests run too and must not be broken, so a changed signature is caught here instead of showing up as a stuck build. With no tests anywhere, the merged interface must still turn into stubs.
+- `Staging.commit(message)` re-checks, then copies the staged files in inside `SuiteLock.accept()`, which commits both directories and relocks, and empties staging.
+- `propose` and `discard` take the run lock and `commit` takes it through `accept()`, so staging never changes during a build.
 
 ## Requirements ledger
 

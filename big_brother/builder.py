@@ -12,6 +12,13 @@ always comes from the locked tests.
 
 Green commits src/ only. Stuck, or any exception, restores src/ to HEAD.
 
+Code under build runs with the user's permissions, so the tests run in a
+temporary copy of `src/` and `tests/` with no `.git`: relative writes cannot
+reach the target, its lock state, staged files, ledger or hooks. Against
+deliberate absolute-path writes the build pins the locked commit in memory
+(rewriting the state file is caught), refuses to start while suite files are
+staged, and treats any staged file that appears during the build as tampering.
+
 Two audiences, two levels of detail. The summary and the progress lines are
 for the test writer, who must never see implementation text, so they carry
 counts, test ids and exception types, plus the message of an AssertionError
@@ -27,6 +34,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,7 +47,8 @@ from typing import Protocol
 from big_brother.ollama import DEFAULT_HOST, DEFAULT_MODEL, OllamaClient, ollama_on_demand
 from big_brother.red_check import MESSAGE_BUDGET, TestOutcome, _clip, _outcomes, fit
 from big_brother.runlock import run_lock
-from big_brother.suite_lock import SuiteLock
+from big_brother.staging import StagingError, staging_path
+from big_brother.suite_lock import SuiteLock, TestsTampered
 
 FILE_BUDGET = 6000      # characters of any one file shown to the model
 OUTPUT_BUDGET = 4000    # characters of pytest output shown to the model (the tail)
@@ -134,24 +143,54 @@ def parse_reply(text: str, allowed: set[str]) -> tuple[dict[str, str], list[str]
 
 
 def _run_tests(repo: Path, tests_dir: str, src_dir: str, timeout: float) -> TestRun:
+    """Run the suite in a git-less copy of src/ and tests/, reporting paths as the target's."""
     with tempfile.TemporaryDirectory(prefix="big_brother_build_") as tmp:
+        work = Path(tmp) / "work"
+        work.mkdir()
+        for d in (src_dir, tests_dir):
+            if (repo / d).is_dir():
+                shutil.copytree(repo / d, work / d, symlinks=True, copy_function=shutil.copyfile,
+                                ignore=shutil.ignore_patterns("__pycache__"))
         out = Path(tmp) / "records.jsonl"
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": os.environ.get("HOME", tmp),
-            "PYTHONPATH": str(repo / src_dir),
+            "PYTHONPATH": str(work / src_dir),
             "PYTHONDONTWRITEBYTECODE": "1",
             "BIG_BROTHER_REDCHECK_OUT": str(out),
         }
-        cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short", "--rootdir", str(repo),
+        cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short", "--rootdir", str(work),
                "-p", "no:cacheprovider", "-p", "big_brother.redcheck_plugin", tests_dir]
         try:
-            proc = subprocess.run(cmd, cwd=repo, env=env, capture_output=True, text=True,
+            proc = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True,
                                   timeout=timeout)
         except subprocess.TimeoutExpired:
             return TestRun([], f"pytest timed out after {timeout}s", None)
         records = [json.loads(l) for l in out.read_text().splitlines()] if out.exists() else []
-    return TestRun(_outcomes(records), proc.stdout + proc.stderr, proc.returncode)
+    for r in records:
+        if r.get("raised_in") and Path(r["raised_in"]).is_relative_to(work):
+            r["raised_in"] = str(repo / Path(r["raised_in"]).relative_to(work))
+    output = (proc.stdout + proc.stderr).replace(str(work), str(repo))
+    return TestRun(_outcomes(records), output, proc.returncode)
+
+
+def _staged(repo: Path) -> list[str]:
+    root = staging_path(repo)
+    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
+                  if not p.is_dir()) if root.is_dir() else []
+
+
+def _guard(repo: Path, lock: SuiteLock) -> None:
+    """Enforce the pinned lock, and wipe and report any staged file planted during the build."""
+    planted = _staged(repo)
+    if planted:
+        shutil.rmtree(staging_path(repo))
+    try:
+        lock.enforce()
+    except TestsTampered as err:
+        raise TestsTampered(err.paths + [f"staged/{p}" for p in planted]) from None
+    if planted:
+        raise TestsTampered([f"staged/{p}" for p in planted])
 
 
 def _from_tests(t: TestOutcome, tests_root: Path) -> bool:
@@ -231,9 +270,12 @@ def build(repo: Path | str, model: Model, max_tries: int = 5, tests_dir: str = "
           interface_dir: str = "interface", src_dir: str = "src", timeout: float = 120,
           progress: Callable[[str], None] = print) -> BuildResult:
     repo = Path(repo)
-    lock = SuiteLock(repo, tests_dir)
+    lock = SuiteLock(repo, tests_dir, interface_dir)
     with run_lock(repo):
         lock.enforce()
+        lock.pin()
+        if _staged(repo):
+            raise StagingError("commit or discard the staged suite files before building")
         if _git(repo, "status", "--porcelain", "--untracked-files=all", "--", src_dir).strip():
             raise DirtySrc(f"commit or remove the changes in {src_dir}/ before building")
         log = _Log(build_log_path(repo))
@@ -252,6 +294,7 @@ def _loop(repo: Path, model: Model, lock: SuiteLock, log: _Log, max_tries: int, 
           progress: Callable[[str], None]) -> BuildResult:
     allowed = allowed_paths(repo, interface_dir, src_dir)
     run = _run_tests(repo, tests_dir, src_dir, timeout)
+    _guard(repo, lock)
     log.write("initial test run", run.output)
     progress(f"start: {run.passed} passed, {run.failed} failed")
     if run.returncode == 5:
@@ -270,7 +313,7 @@ def _loop(repo: Path, model: Model, lock: SuiteLock, log: _Log, max_tries: int, 
         for rel, body in files.items():
             (repo / rel).parent.mkdir(parents=True, exist_ok=True)
             (repo / rel).write_text(body)
-        lock.enforce()
+        _guard(repo, lock)
         notes = ""
         if refused:
             notes += (f"These paths were refused and not written: {', '.join(refused)}. "
@@ -279,7 +322,7 @@ def _loop(repo: Path, model: Model, lock: SuiteLock, log: _Log, max_tries: int, 
             notes += "Your reply had no FILE blocks, so nothing was written. Use the format.\n"
         progress(f"{step}: wrote {len(files)} file(s), refused {len(refused)}")
         run = _run_tests(repo, tests_dir, src_dir, timeout)
-        lock.enforce()
+        _guard(repo, lock)
         log.write(f"{step} test run", run.output)
         progress(f"{step}: {run.passed} passed, {run.failed} failed")
         if run.green:

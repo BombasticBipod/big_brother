@@ -230,7 +230,7 @@ def feedback(repo: Path | str, tests_dir: str = "tests", interface_dir: str = "i
              progress: Callable[[str], None] = print) -> FeedbackResult:
     repo = Path(repo)
     with run_lock(repo):
-        SuiteLock(repo, tests_dir).enforce()
+        SuiteLock(repo, tests_dir, interface_dir).enforce()
         if _git(repo, "status", "--porcelain", "--untracked-files=all", "--", src_dir).strip():
             raise DirtySrc(f"commit or remove the changes in {src_dir}/ before feedback")
         if not _git(repo, "ls-tree", "--name-only", "HEAD", "--", src_dir).strip():
