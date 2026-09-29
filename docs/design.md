@@ -19,7 +19,8 @@ On one filesystem nothing physically stops either side touching the other's file
 - The builder must never write `tests/`. The **suite lock** keeps `tests/` locked at all times, not only during builds: the files and directories are read-only on disk, and the locked commit is recorded in `.git/big_brother/suite_lock.json`. The only way to change tests is `accept(message)`, which unlocks, lets the test writer edit, commits only `tests/` and locks again at the new commit. If the writer fails partway, its edits are discarded and the old suite stays locked.
 - Read-only permissions stop accidental writes, not a process that chmods its way in, so after every builder iteration the lock also compares `tests/` with the locked commit (modified, added, deleted, staged or committed). Any change aborts the run and reverts `tests/`.
 - Runs take turns, never overlap: `build()` holds a lock so tests cannot change mid-run.
-- Code under build runs with the user's permissions. The builder runs pytest in a temporary copy of `src/` and `tests/` with no `.git`, so relative writes cannot reach the target, its lock state, staged files, ledger or hooks. A temporary copy does not stop deliberate absolute-path writes, so the build also pins the locked commit in memory (a rewritten `suite_lock.json` is restored and reported as tampering), refuses to start while suite files are staged, and treats any staged file that appears during the build as tampering: it is wiped and the build aborts. Full isolation (a sandbox such as bubblewrap) is not built; revisit it before driving untrusted models.
+- Code under build is untrusted. Every run of it (the builder's pytest runs, feedback's coverage and mutmut runs, and red checks of proposed tests) happens in a temporary copy inside a bubblewrap sandbox (`big_brother/sandbox.py`). The sandbox sees `/usr`, big_brother's virtualenv and package (read-only), fresh `/proc`, `/dev` and `/tmp`, and one writable directory: the temporary copy. It has no home directory, no target, no `.git`, no network and no view of other processes; all capabilities are dropped and the root is read-only. A missing `bwrap` is an error before anything is written, never a silent fallback. The kernel is shared, so escaping needs a kernel exploit.
+- Behind the sandbox, as defense in depth, the build also pins the locked commit in memory (a rewritten `suite_lock.json` is restored and reported as tampering), refuses to start while suite files are staged, and treats any staged file that appears during the build as tampering: it is wiped and the build aborts.
 
 Note: these rules apply to the *target* project that big_brother drives, not to big_brother's own source in `big_brother/`.
 
@@ -112,6 +113,7 @@ The MCP server runs outside Claude Code's sandbox, so builds and feedback still 
 6. MCP server wrapping all of it, with permission tests (writes outside the allowed directory are rejected, results stay under budget). (Done.)
 7. End to end on one toy requirement. (Done.)
 8. Claude Code permission settings denying reads of the target's `src/` and of everything under `.git/big_brother/` (`build.log`, `feedback.log` and any later log), since those logs quote implementation text. (Done.)
+9. Sandbox: bubblewrap around every run of model-written code and proposed tests, so absolute paths cannot reach the target, the home directory or the network. (Done.)
 
 ## Operating rules
 
