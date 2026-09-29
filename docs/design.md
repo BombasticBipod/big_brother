@@ -54,6 +54,12 @@ mutmut is pinned to 3.8 because the parser reads mutmut's internal mutant names 
 
 Limit: the interface names are read from the working tree's `interface/`, while `src/` and `tests/` come from HEAD. Once the suite lock covers `interface/` (before step 6), read it from HEAD too.
 
+## Requirements ledger
+
+The ledger is a SQLite file at `.git/big_brother/ledger.sqlite` in the target (stdlib `sqlite3`, no dependency). It is bookkeeping, not contract, so it is not committed. The user adds requirements with `python -m big_brother.ledger --repo TARGET add "TEXT"` and reads them with `list`.
+
+Each requirement is **open** (no tests yet), **tested** (tests committed; `suite_commit` is the latest such commit) or **done** (a build went green; `src_commit` is its commit). Committing more tests keeps a requirement tested and updates the commit. A stuck build keeps it tested and counts in `stuck_builds`. Done is final. `next()` returns the oldest tested requirement before the oldest open one, so a stuck build is finished before new work starts.
+
 ## MCP server
 
 Claude Code is the only MCP client. The builder is a backend job the server runs. Tools:
@@ -73,7 +79,7 @@ Claude Code's cycle: pick a requirement, write a test, confirm red, commit, buil
 2. Red check: stub generation and confirming new tests fail correctly. (Done.)
 3. Builder loop: pytest plus Ollama, max tries, green or stuck result. (Done.)
 4. Feedback: coverage and mutmut summaries under a size budget. (Done.)
-5. Requirements ledger in SQLite.
+5. Requirements ledger in SQLite. (Done.)
 6. MCP server wrapping all of it, with permission tests (writes outside the allowed directory are rejected, results stay under budget).
 7. End to end on one toy requirement.
 8. Claude Code permission settings denying reads of the target's `src/` and of everything under `.git/big_brother/` (`build.log`, `feedback.log` and any later log), since those logs quote implementation text.
