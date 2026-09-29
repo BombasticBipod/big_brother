@@ -39,10 +39,15 @@ class SandboxUnavailable(Exception):
     """bubblewrap is not installed, so code under build cannot be isolated."""
 
 
-def sandboxed(cmd: list[str], writable: Path | str, cwd: Path | str) -> list[str]:
+def require_bwrap() -> str:
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         raise SandboxUnavailable("install bubblewrap (dnf install bubblewrap) to run builds")
+    return bwrap
+
+
+def sandboxed(cmd: list[str], writable: Path | str, cwd: Path | str) -> list[str]:
+    bwrap = require_bwrap()
     venv = Path(sys.prefix).resolve()
     package = Path(big_brother.__file__).resolve().parent
     args = [bwrap, "--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",

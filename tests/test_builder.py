@@ -263,7 +263,7 @@ def test_rewriting_the_lock_state_during_a_build_is_caught(target):
             f"pathlib.Path({str(state)!r}).write_text(json.dumps({{'tests': head}}))\n")
     before = SuiteLock(target).base
     with pytest.raises(TestsTampered):
-        run(target, FakeModel(plant(code)))
+        run(target, FakeModel(plant(code)), sandbox=False)   # the guard behind the sandbox
     assert SuiteLock(target).base == before
     assert "assert add(2, 3) == 5" in test_file.read_text()
 
@@ -275,8 +275,46 @@ def test_staged_files_planted_during_a_build_are_caught_and_wiped(target):
             "p.parent.mkdir(parents=True, exist_ok=True)\n"
             "p.write_text('def test_evil():\\n    assert False\\n')\n")
     with pytest.raises(TestsTampered):
-        run(target, FakeModel(plant(code)))
+        run(target, FakeModel(plant(code)), sandbox=False)   # the guard behind the sandbox
     assert not staged.exists()
+
+
+def test_the_sandbox_keeps_absolute_writes_out_of_the_target(target):
+    staged = target / ".git" / "big_brother" / "staged" / "tests" / "test_evil.py"
+    home_file = Path.home() / "big_brother_planted_marker"
+    home_file.unlink(missing_ok=True)  # left over if a run ever escaped
+    code = ("import pathlib\n"
+            f"for path in ({str(staged)!r}, {str(target / 'src' / 'extra.py')!r}, "
+            f"{str(home_file)!r}):\n"
+            "    try:\n"
+            "        p = pathlib.Path(path)\n"
+            "        p.parent.mkdir(parents=True, exist_ok=True)\n"
+            "        p.write_text('planted')\n"
+            "    except OSError:\n"
+            "        pass\n")
+    result = run(target, FakeModel(plant(code)))
+    assert result.status == "green"
+    assert not staged.exists() and not home_file.exists()
+    assert not (target / "src" / "extra.py").exists()
+
+
+def test_the_sandbox_has_no_network(target):
+    code = ("import socket\n"
+            "try:\n"
+            "    socket.create_connection(('1.1.1.1', 53), timeout=3)\n"
+            "    raise SystemExit('network reachable')\n"
+            "except OSError:\n"
+            "    pass\n")
+    assert run(target, FakeModel(plant(code))).status == "green"
+
+
+def test_build_without_bubblewrap_refuses_to_run(target, monkeypatch):
+    from big_brother import sandbox
+    from big_brother.sandbox import SandboxUnavailable
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
+    with pytest.raises(SandboxUnavailable):
+        run(target, FakeModel(GOOD))
+    assert not (target / "src").exists()
 
 
 def test_build_is_refused_while_suite_files_are_staged(target):

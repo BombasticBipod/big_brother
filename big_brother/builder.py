@@ -12,10 +12,10 @@ always comes from the locked tests.
 
 Green commits src/ only. Stuck, or any exception, restores src/ to HEAD.
 
-Code under build runs with the user's permissions, so the tests run in a
-temporary copy of `src/` and `tests/` with no `.git`: relative writes cannot
-reach the target, its lock state, staged files, ledger or hooks. Against
-deliberate absolute-path writes the build pins the locked commit in memory
+Code under build is untrusted, so the tests run in a temporary copy of `src/`
+and `tests/` inside a bubblewrap sandbox (big_brother.sandbox): no target, no
+`.git`, no home directory, no network. Behind the sandbox, as defense in
+depth, the build pins the locked commit in memory
 (rewriting the state file is caught), refuses to start while suite files are
 staged, and treats any staged file that appears during the build as tampering.
 
@@ -47,6 +47,7 @@ from typing import Protocol
 from big_brother.ollama import DEFAULT_HOST, DEFAULT_MODEL, OllamaClient, ollama_on_demand
 from big_brother.red_check import MESSAGE_BUDGET, TestOutcome, _clip, _outcomes, fit
 from big_brother.runlock import run_lock
+from big_brother.sandbox import require_bwrap, sandboxed
 from big_brother.staging import StagingError, staging_path
 from big_brother.suite_lock import SuiteLock, TestsTampered
 
@@ -142,8 +143,9 @@ def parse_reply(text: str, allowed: set[str]) -> tuple[dict[str, str], list[str]
     return files, refused
 
 
-def _run_tests(repo: Path, tests_dir: str, src_dir: str, timeout: float) -> TestRun:
-    """Run the suite in a git-less copy of src/ and tests/, reporting paths as the target's."""
+def _run_tests(repo: Path, tests_dir: str, src_dir: str, timeout: float,
+               sandbox: bool = True) -> TestRun:
+    """Run the suite in a sandboxed copy of src/ and tests/, reporting paths as the target's."""
     with tempfile.TemporaryDirectory(prefix="big_brother_build_") as tmp:
         work = Path(tmp) / "work"
         work.mkdir()
@@ -154,13 +156,15 @@ def _run_tests(repo: Path, tests_dir: str, src_dir: str, timeout: float) -> Test
         out = Path(tmp) / "records.jsonl"
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": os.environ.get("HOME", tmp),
+            "HOME": tmp,
             "PYTHONPATH": str(work / src_dir),
             "PYTHONDONTWRITEBYTECODE": "1",
             "BIG_BROTHER_REDCHECK_OUT": str(out),
         }
         cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short", "--rootdir", str(work),
                "-p", "no:cacheprovider", "-p", "big_brother.redcheck_plugin", tests_dir]
+        if sandbox:
+            cmd = sandboxed(cmd, writable=tmp, cwd=work)
         try:
             proc = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True,
                                   timeout=timeout)
@@ -268,8 +272,11 @@ class _Log:
 
 def build(repo: Path | str, model: Model, max_tries: int = 5, tests_dir: str = "tests",
           interface_dir: str = "interface", src_dir: str = "src", timeout: float = 120,
-          progress: Callable[[str], None] = print) -> BuildResult:
+          progress: Callable[[str], None] = print, sandbox: bool = True) -> BuildResult:
+    """Build src/ until the locked suite is green. sandbox=False exists only to test the guards."""
     repo = Path(repo)
+    if sandbox:
+        require_bwrap()
     lock = SuiteLock(repo, tests_dir, interface_dir)
     with run_lock(repo):
         lock.enforce()
@@ -282,7 +289,7 @@ def build(repo: Path | str, model: Model, max_tries: int = 5, tests_dir: str = "
         log.write("build started", f"max_tries={max_tries}")
         try:
             return _loop(repo, model, lock, log, max_tries, tests_dir, interface_dir, src_dir,
-                         timeout, progress)
+                         timeout, progress, sandbox)
         except BaseException as err:
             log.write("build aborted", repr(err))
             _restore_src(repo, src_dir)
@@ -291,9 +298,9 @@ def build(repo: Path | str, model: Model, max_tries: int = 5, tests_dir: str = "
 
 def _loop(repo: Path, model: Model, lock: SuiteLock, log: _Log, max_tries: int, tests_dir: str,
           interface_dir: str, src_dir: str, timeout: float,
-          progress: Callable[[str], None]) -> BuildResult:
+          progress: Callable[[str], None], sandbox: bool) -> BuildResult:
     allowed = allowed_paths(repo, interface_dir, src_dir)
-    run = _run_tests(repo, tests_dir, src_dir, timeout)
+    run = _run_tests(repo, tests_dir, src_dir, timeout, sandbox)
     _guard(repo, lock)
     log.write("initial test run", run.output)
     progress(f"start: {run.passed} passed, {run.failed} failed")
@@ -321,7 +328,7 @@ def _loop(repo: Path, model: Model, lock: SuiteLock, log: _Log, max_tries: int, 
         if not files and not refused:
             notes += "Your reply had no FILE blocks, so nothing was written. Use the format.\n"
         progress(f"{step}: wrote {len(files)} file(s), refused {len(refused)}")
-        run = _run_tests(repo, tests_dir, src_dir, timeout)
+        run = _run_tests(repo, tests_dir, src_dir, timeout, sandbox)
         _guard(repo, lock)
         log.write(f"{step} test run", run.output)
         progress(f"{step}: {run.passed} passed, {run.failed} failed")
