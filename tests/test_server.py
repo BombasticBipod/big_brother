@@ -228,3 +228,40 @@ def test_the_server_speaks_stdio_as_a_subprocess(target):
             return names, result.content[0].text
     names, text = anyio.run(go)
     assert "build" in names and text == "1 [open] add two numbers"
+
+
+def test_ollama_starts_once_per_session_and_stops_when_it_ends(target):
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def counting():
+        events.append("start")
+        try:
+            yield
+        finally:
+            events.append("stop")
+
+    server = make_server(target, model=FakeModel(BAD, GOOD), on_demand=counting)
+    call(server, "propose_test", path="tests/test_add.py", content=TEST_ADD)
+    call(server, "commit_tests", message="test add", requirement_id=1)
+
+    async def go():
+        async with Client(server) as client:
+            await client.call_tool("build", {"max_tries": 1})
+            await client.call_tool("build", {"max_tries": 2})
+            events.append("builds done")
+            await client.call_tool("next_requirement", {})
+    anyio.run(go)
+    assert events == ["start", "builds done", "stop"]
+
+
+def test_a_session_without_builds_never_starts_ollama(target):
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def counting():
+        events.append("start")
+        yield
+
+    call(make_server(target, model=FakeModel(GOOD), on_demand=counting), "next_requirement")
+    assert events == []

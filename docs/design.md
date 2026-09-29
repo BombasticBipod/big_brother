@@ -102,5 +102,5 @@ Claude Code's cycle: pick a requirement, write a test, confirm red, commit, buil
 
 ## Operating rules
 
-- Ollama is started once per build run and stopped at the end, never left always-on (see the user's ollama-on-demand preference).
+- Ollama is started once per run and stopped at its end, never left always-on and never restarted per step (see the user's ollama-on-demand preference). For the command-line builder a run is one build; for the MCP server it is the whole session: the first `build` starts Ollama and the session's end stops it.
 - Everything is test-driven with pytest and tracked in git.

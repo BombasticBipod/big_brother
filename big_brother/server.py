@@ -19,6 +19,11 @@ Tools:
   every tested requirement done; stuck counts against each of them.
 - `feedback()`: coverage and surviving mutants, by interface name.
 
+Ollama starts on the first `build` of a session and stays up for the rest of
+it; the session's end stops it, and only if the server started it. A session
+that never builds never starts it. `main()` turns SIGTERM into a normal exit so
+that stop still runs when Claude Code closes the server.
+
 A stdio MCP server must never write to stdout, which carries the protocol.
 Build and feedback progress goes to `.git/big_brother/progress.log`, which the
 user can follow with `tail -f`; it holds counts only.
@@ -29,10 +34,13 @@ from __future__ import annotations
 
 import argparse
 import re
+import signal
 import subprocess
+import sys
+import threading
 import time
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractContextManager, ExitStack, asynccontextmanager
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -87,7 +95,28 @@ def make_server(repo: Path | str, model: Model | None = None,
         model, on_demand = client, on_demand or (lambda: ollama_on_demand(is_up=client.is_up))
     start_model = on_demand or ollama_on_demand
     staging = Staging(repo, tests_dir, interface_dir)
-    server = MCPServer("big_brother", instructions=INSTRUCTIONS)
+    model_up = ExitStack()
+    model_lock = threading.Lock()
+    started = False
+
+    def ensure_model() -> None:
+        nonlocal started
+        with model_lock:
+            if not started:
+                model_up.enter_context(start_model())
+                started = True
+
+    @asynccontextmanager
+    async def session(_server: MCPServer) -> AsyncIterator[dict]:
+        nonlocal started
+        try:
+            yield {}
+        finally:
+            with model_lock:
+                model_up.close()
+                started = False
+
+    server = MCPServer("big_brother", instructions=INSTRUCTIONS, lifespan=session)
 
     def ledger() -> Ledger:
         return Ledger(repo)
@@ -163,10 +192,10 @@ def make_server(repo: Path | str, model: Model | None = None,
     def build(max_tries: int = 5) -> str:
         """Let the local model implement src/ until the locked suite is green or tries run out."""
         try:
-            with start_model():
-                result = run_build(repo, model, max_tries=max_tries, tests_dir=tests_dir,
-                                   interface_dir=interface_dir,
-                                   progress=_progress_writer(repo, "build"))
+            ensure_model()
+            result = run_build(repo, model, max_tries=max_tries, tests_dir=tests_dir,
+                               interface_dir=interface_dir,
+                               progress=_progress_writer(repo, "build"))
         except REFUSALS as err:
             raise _refuse(err) from None
         book = ledger()
@@ -197,6 +226,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Serve one target project to Claude Code.")
     parser.add_argument("target")
     args = parser.parse_args(argv)
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
     make_server(args.target).run("stdio")
 
 
