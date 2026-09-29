@@ -10,7 +10,7 @@ from mcp import Client
 
 from big_brother.ledger import Ledger
 from big_brother.red_check import SUMMARY_BUDGET
-from big_brother.server import INTERFACE_BUDGET, make_server, progress_path
+from big_brother.server import builder_from_spec, INTERFACE_BUDGET, make_server, progress_path
 from big_brother.staging import Staging, staging_path
 from big_brother.suite_lock import SuiteLock
 
@@ -82,7 +82,7 @@ def tool_names(server) -> set[str]:
 def test_the_server_offers_exactly_the_designed_tools(target):
     assert tool_names(serve(target)) == {
         "next_requirement", "get_interface", "propose_test", "propose_interface",
-        "discard_staged", "commit_tests", "build", "feedback"}
+        "discard_staged", "commit_tests", "build", "feedback", "add_requirement"}
 
 
 def test_next_requirement(target):
@@ -287,3 +287,44 @@ def test_without_bubblewrap_tools_refuse_cleanly_and_nothing_is_left_behind(targ
         error, text = call(server, tool)
         assert error and "install bubblewrap" in text
     assert started == []
+
+
+# goal splitting and the builder stream
+
+def test_add_requirement_adds_to_the_ledger(target):
+    assert call(serve(target), "add_requirement", text="subtract two numbers") == (False, "added 2")
+    assert [r.text for r in Ledger(target).all()][-1] == "subtract two numbers"
+
+
+def test_add_requirement_refuses_empty_and_long_text(target):
+    assert call(serve(target), "add_requirement", text="  ")[0]
+    assert call(serve(target), "add_requirement", text="x" * 501)[0]
+    assert len(Ledger(target).all()) == 1
+
+
+class StreamingModel(FakeModel):
+    def chat(self, messages, on_token=None):
+        text = super().chat(messages)
+        if on_token:
+            on_token(text)
+        return text
+
+
+def test_build_streams_the_model_reply_to_the_stream_file(target, tmp_path):
+    stream = target / ".git" / "big_brother" / "streams" / "builder.log"
+    stream.parent.mkdir(parents=True)
+    server = make_server(target, model=StreamingModel(GOOD), on_demand=no_ollama, stream=stream)
+    call(server, "propose_test", path="tests/test_calc.py", content=TEST_ADD)
+    call(server, "commit_tests", message="t", requirement_id=1)
+    assert call(server, "build", max_tries=2)[1].startswith("green")
+    shown = stream.read_text()
+    assert SECRET in shown and "try 1/2" in shown
+
+
+def test_builder_spec_picks_the_model_and_its_on_demand():
+    model, on_demand = builder_from_spec("ollama:m:1b")
+    assert model.model == "m:1b" and on_demand is not None
+    model, on_demand = builder_from_spec("anthropic:claude-sonnet-5-5", client=object())
+    assert model.model == "claude-sonnet-5-5"
+    with on_demand():
+        pass

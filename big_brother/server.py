@@ -6,6 +6,8 @@ writer must not see `src/`. Refusals come back as tool errors (`is_error`),
 clipped to the same budget, so the writer can read them and try again.
 
 Tools:
+- `add_requirement(text)`: record one requirement, so a writer given a goal
+  can split it into ledger items itself.
 - `next_requirement()`: the next ledger item, stuck or tested work first.
 - `get_interface(module)`: a module's `.pyi`, staged version first; with an
   empty module name, the list of modules.
@@ -28,7 +30,12 @@ A stdio MCP server must never write to stdout, which carries the protocol.
 Build and feedback progress goes to `.git/big_brother/progress.log`, which the
 user can follow with `tail -f`; it holds counts only.
 
-Usage: python -m big_brother.server TARGET
+`--builder SPEC` picks the builder (`ollama:MODEL` or `anthropic:MODEL`, see
+`big_brother.roles`); `--stream FILE` appends the builder's reply to FILE as
+it is written, for the user's builder window. That file carries implementation
+text, so it must live under `.git/big_brother/`, which the writer cannot read.
+
+Usage: python -m big_brother.server TARGET [--builder SPEC] [--stream FILE]
 """
 from __future__ import annotations
 
@@ -40,7 +47,7 @@ import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractContextManager, ExitStack, asynccontextmanager
+from contextlib import AbstractContextManager, ExitStack, asynccontextmanager, nullcontext
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -52,6 +59,7 @@ from big_brother.ledger import Ledger, LedgerError
 from big_brother.ollama import OllamaClient, OllamaError, ollama_on_demand
 from big_brother.red_check import SUMMARY_BUDGET, _clip
 from big_brother.runlock import BuildBusy
+from big_brother.roles import make_builder
 from big_brother.sandbox import SandboxUnavailable, require_bwrap
 from big_brother.staging import Staging, StagingError
 from big_brother.suite_lock import NotLocked, TestsTampered
@@ -62,8 +70,10 @@ MODULE = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
 REFUSALS = (StagingError, LedgerError, BuildBusy, TestsTampered, DirtySrc, NotLocked,
             OllamaError, SandboxUnavailable, ValueError)
 
+REQUIREMENT_BUDGET = 500   # characters of one requirement added by the writer
+
 INSTRUCTIONS = """You write pytest tests for a project whose implementation you never see.
-Cycle: next_requirement, get_interface, propose_interface if the interface needs a change,
+Split a goal into requirements with add_requirement. Cycle: next_requirement, get_interface, propose_interface if the interface needs a change,
 propose_test until it reports red, commit_tests, build, feedback, then the next test."""
 
 
@@ -83,19 +93,39 @@ def _progress_writer(repo: Path, job: str) -> Callable[[str], None]:
     return write
 
 
+def builder_from_spec(spec: str, client=None) -> tuple[Model, Callable[[], AbstractContextManager]]:
+    """The builder model for a role spec, and how to make sure it is up for a build."""
+    model = make_builder(spec, client=client)
+    if isinstance(model, OllamaClient):
+        return model, lambda: ollama_on_demand(is_up=model.is_up)
+    return model, nullcontext
+
+
+def _stream_writer(path: Path | None) -> Callable[[str], None] | None:
+    if path is None:
+        return None
+
+    def write(text: str) -> None:
+        with open(path, "a") as stream:
+            stream.write(text)
+    return write
+
+
 def _refuse(err: Exception) -> ToolError:
     return ToolError(_clip(str(err), ERROR_BUDGET))
 
 
 def make_server(repo: Path | str, model: Model | None = None,
                 on_demand: Callable[[], AbstractContextManager] | None = None,
-                tests_dir: str = "tests", interface_dir: str = "interface") -> MCPServer:
+                tests_dir: str = "tests", interface_dir: str = "interface",
+                stream: Path | str | None = None) -> MCPServer:
     repo = Path(repo).resolve()
     if model is None:
         client = OllamaClient()
         model, on_demand = client, on_demand or (lambda: ollama_on_demand(is_up=client.is_up))
     start_model = on_demand or ollama_on_demand
     staging = Staging(repo, tests_dir, interface_dir)
+    stream_to = _stream_writer(Path(stream) if stream else None)
     model_up = ExitStack()
     model_lock = threading.Lock()
     started = False
@@ -138,6 +168,16 @@ def make_server(repo: Path | str, model: Model | None = None,
             return "no open requirements"
         stuck = f" (stuck builds: {req.stuck_builds})" if req.stuck_builds else ""
         return _clip(f"{req.id} [{req.status}] {req.text}{stuck}", SUMMARY_BUDGET)
+
+    @server.tool()
+    def add_requirement(text: str) -> str:
+        """Record one requirement (one behavior) in the ledger; returns its id."""
+        text = " ".join(text.split())
+        if not text:
+            raise ToolError("give the requirement text")
+        if len(text) > REQUIREMENT_BUDGET:
+            raise ToolError(f"keep a requirement under {REQUIREMENT_BUDGET} characters; split it")
+        return f"added {ledger().add(text)}"
 
     @server.tool()
     def get_interface(module: str) -> str:
@@ -197,7 +237,7 @@ def make_server(repo: Path | str, model: Model | None = None,
             ensure_model()
             result = run_build(repo, model, max_tries=max_tries, tests_dir=tests_dir,
                                interface_dir=interface_dir,
-                               progress=_progress_writer(repo, "build"))
+                               progress=_progress_writer(repo, "build"), stream=stream_to)
         except REFUSALS as err:
             raise _refuse(err) from None
         book = ledger()
@@ -227,9 +267,12 @@ def make_server(repo: Path | str, model: Model | None = None,
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Serve one target project to Claude Code.")
     parser.add_argument("target")
+    parser.add_argument("--builder", default=None, help="builder role spec, e.g. ollama:MODEL")
+    parser.add_argument("--stream", default=None, help="file the builder's reply streams to")
     args = parser.parse_args(argv)
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
-    make_server(args.target).run("stdio")
+    model, on_demand = builder_from_spec(args.builder) if args.builder else (None, None)
+    make_server(args.target, model=model, on_demand=on_demand, stream=args.stream).run("stdio")
 
 
 if __name__ == "__main__":
