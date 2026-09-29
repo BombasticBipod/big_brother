@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Claude Code writes the tests, a local Ollama model writes the code, and neither may touch the other's files."
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=1.9.0",
     "mcp>=2.2.0",
 ]
 
