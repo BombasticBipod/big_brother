@@ -226,3 +226,24 @@ def test_a_symlink_in_the_overlay_is_broken(project, tmp_path):
     (staged / "tests" / "leak.py").symlink_to(project / "src" / "secret.py")
     r = red_check(project, ["tests/test_add.py"], overlay=staged)
     assert r.status == "broken" and "symlink" in r.summary
+
+
+# sandbox
+
+def test_proposed_tests_cannot_read_src_by_absolute_path(project):
+    secret = project / "src" / "secret.py"
+    r = check(project, {"tests/test_peek.py": (
+        "def test_peek():\n"
+        "    try:\n"
+        f"        open({str(secret)!r}).read()\n"
+        "    except OSError:\n"
+        "        raise NotImplementedError\n"
+        "    raise AssertionError('read src')\n")})
+    assert [(t.verdict, t.exc_type) for t in r.tests] == [("red", "NotImplementedError")]
+
+
+def test_red_check_without_bubblewrap_refuses_to_run(project, monkeypatch):
+    from big_brother import sandbox
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
+    with pytest.raises(sandbox.SandboxUnavailable):
+        check(project, {"tests/test_add.py": "from calc import add\ndef test_add():\n    assert add(2, 3) == 5\n"})

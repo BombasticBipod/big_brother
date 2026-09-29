@@ -5,6 +5,8 @@ target's `interface/` and a copy of its `tests/`, then runs the named test
 files there with a clean environment. The target's real `src/`, root
 conftest and pytest configuration are never on the path, so a test cannot
 pass by reaching real code, and no implementation text reaches the result.
+The run happens inside the bubblewrap sandbox (big_brother.sandbox), so a
+test cannot open `src/` by absolute path either.
 
 Each test gets a verdict:
 - red: it failed with NotImplementedError or AssertionError, in setup or call.
@@ -38,6 +40,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from big_brother.sandbox import require_bwrap, sandboxed
 from big_brother.stubs import InterfaceError, make_stubs
 
 RED_EXCEPTIONS = {"NotImplementedError", "AssertionError"}
@@ -154,6 +157,7 @@ def red_check(repo: Path | str, test_paths: list[str], interface_dir: str = "int
               tests_dir: str = "tests", timeout: float = 120,
               overlay: Path | str | None = None) -> RedResult:
     repo = Path(repo)
+    require_bwrap()
     _check_paths(tests_dir, test_paths)
     layers = [repo] + ([Path(overlay)] if overlay is not None else [])
     link = _symlink([layer / d for layer in layers for d in (interface_dir, tests_dir)])
@@ -172,7 +176,7 @@ def red_check(repo: Path | str, test_paths: list[str], interface_dir: str = "int
         out = tmp / "records.jsonl"
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": os.environ.get("HOME", str(tmp)),
+            "HOME": str(tmp),
             "PYTHONPATH": str(tmp / "stubs"),
             "PYTHONDONTWRITEBYTECODE": "1",
             "BIG_BROTHER_REDCHECK_OUT": str(out),
@@ -180,6 +184,7 @@ def red_check(repo: Path | str, test_paths: list[str], interface_dir: str = "int
         cmd = [sys.executable, "-m", "pytest", "-q", "-c", str(tmp / "pytest.ini"),
                "--rootdir", str(tmp), "-p", "no:cacheprovider",
                "-p", "big_brother.redcheck_plugin", *test_paths]
+        cmd = sandboxed(cmd, writable=tmp, cwd=tmp)
         try:
             proc = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True,
                                   timeout=timeout)
