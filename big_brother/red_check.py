@@ -87,12 +87,12 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
-def fit(prefix: str, lines: list[str], budget: int = SUMMARY_BUDGET) -> str:
-    """Join lines after prefix with "; ", ending with "(+N more)" where the budget runs out."""
+def fit(prefix: str, lines: list[str], budget: int = SUMMARY_BUDGET, sep: str = "; ") -> str:
+    """Join lines after prefix with sep, ending with "(+N more)" where the budget runs out."""
     out = prefix
     for i, line in enumerate(lines):
         more = f" (+{len(lines) - i} more)"
-        piece = ("; " if i else "") + line
+        piece = (sep if i else "") + line
         if len(out) + len(piece) + len(more) > budget:
             return out + more
         out += piece

@@ -6,7 +6,11 @@ requires-python = ">=3.12"
 dependencies = []
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "coverage>=7.16.2",
+    "mutmut==3.8.*",  # the feedback parser reads mutmut's internal mutant names
+    "pytest>=8",
+]
 
 [build-system]
 requires = ["hatchling"]

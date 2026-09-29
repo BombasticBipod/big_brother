@@ -38,13 +38,21 @@ Limits: red against stubs is automatic for any test that calls the interface, ev
 
 Green commits `src/` only. Stuck, or any exception (model error, interrupt, tampering), restores `src/` to HEAD.
 
-The summary and progress lines go to the test writer, so they carry only counts, test ids and exception types. The one exception is the message of an AssertionError raised in a test file. Any exception raised inside `src/`, including a failed `assert` there or a syntax error, can quote implementation text, so those messages are dropped. Prompts, replies and full pytest output go to `.git/big_brother/build.log`. That log contains implementation text, so step 8 must deny reads of it as well as `src/`.
+The summary and progress lines go to the test writer, so they carry only counts, test ids and exception types. The one exception is the message of an AssertionError raised in a test file. Any exception raised inside `src/`, including a failed `assert` there or a syntax error, can quote implementation text, so those messages are dropped. Prompts, replies and full pytest output go to `.git/big_brother/build.log`. That log contains implementation text, so step 8 must deny reads of `.git/big_brother/` as well as `src/`.
 
 The model call always sets `num_ctx`, because a server default that is too small silently cuts the front of the prompt, where the format rules are. Ollama is started for the build and stopped at the end if the build started it. Tests use a fake model. The real-model check is opt-in (`uv run pytest -m ollama`) so the default suite passes with Ollama stopped.
 
 ## Feedback
 
 Red check, coverage and mutation testing (mutmut) all run locally at no token cost. Claude Code only sees short summaries: gaps and surviving mutants.
+
+`feedback(repo)` takes the run lock, enforces the suite lock and refuses uncommitted `src/`. It extracts `src/` and `tests/` from HEAD with `git archive` into a temporary directory, so the target is never touched and the result describes committed code. There it runs the suite under branch coverage, then `mutmut run`. A suite that is not green stops before mutation with "suite is not green; build first". A timeout or a missing coverage report returns status `failed` with a one-line reason.
+
+Results are named only by what the interface declares: `calc.sign`, `calc.Counter.bump`. Helpers, nested functions and undeclared classes in a declared module fold into "<module> (other code)". Modules with no `.pyi` fold into one "other modules" bucket. Line numbers are left out. The summary lists coverage gaps and surviving mutants, lowest coverage and most survivors first, in the 500-character budget. Progress lines carry counts only. Full coverage and mutmut output, which quotes mutated source lines, goes to `.git/big_brother/feedback.log`.
+
+mutmut is pinned to 3.8 because the parser reads mutmut's internal mutant names (`<module>.x_<function>__mutmut_<n>`, `<module>.xǁ<Class>ǁ<method>__mutmut_<n>`).
+
+Limit: the interface names are read from the working tree's `interface/`, while `src/` and `tests/` come from HEAD. Once the suite lock covers `interface/` (before step 6), read it from HEAD too.
 
 ## MCP server
 
@@ -64,11 +72,11 @@ Claude Code's cycle: pick a requirement, write a test, confirm red, commit, buil
 1. Suite lock: `tests/` locked at all times, unlocked only to accept committed changes; tampering detected and reverted. (Done.)
 2. Red check: stub generation and confirming new tests fail correctly. (Done.)
 3. Builder loop: pytest plus Ollama, max tries, green or stuck result. (Done.)
-4. Feedback: coverage and mutmut summaries under a size budget.
+4. Feedback: coverage and mutmut summaries under a size budget. (Done.)
 5. Requirements ledger in SQLite.
 6. MCP server wrapping all of it, with permission tests (writes outside the allowed directory are rejected, results stay under budget).
 7. End to end on one toy requirement.
-8. Claude Code permission settings denying reads of the target's `src/` and of `.git/big_brother/build.log`.
+8. Claude Code permission settings denying reads of the target's `src/` and of everything under `.git/big_brother/` (`build.log`, `feedback.log` and any later log), since those logs quote implementation text.
 
 ## Operating rules
 
