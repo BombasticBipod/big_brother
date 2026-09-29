@@ -1,6 +1,6 @@
 # big_brother: what exists today
 
-Snapshot of 2026-09-29, branch `run` (8 commits ahead of `main`). `docs/design.md` holds the full design and the reasons behind it; this file is the short version.
+Snapshot of 2026-09-29, branch `reference` (off `run`, which is 8 commits ahead of `main`). `docs/design.md` holds the full design and the reasons behind it; this file is the short version.
 
 ## Description
 
@@ -41,7 +41,7 @@ big_brother drives a separate *target* project. The target holds `interface/*.py
 
 ### Reference answers (branch `reference`, off `run`)
 
-- `python -m big_brother.server TARGET --reference none|stuck|all` sets when the writer is asked for its own `src/`. The default is `none`.
+- `python -m big_brother.server TARGET --reference none|stuck|all` (or `scripts/register_mcp.sh TARGET --reference stuck`) sets when the writer is asked for its own `src/`. The default is `none`.
 - The `submit_reference(requirement_id, files)` tool checks the files against the locked suite, on their own, in the sandbox. Every submission is appended to `.git/big_brother/reference/references.jsonl` with a green flag, so red answers are kept but can be filtered out.
 - The builder never sees a reference.
 
@@ -54,5 +54,5 @@ big_brother drives a separate *target* project. The target holds `interface/*.py
 ## Operating rules
 
 - Ollama starts once per run and stops at the end. It is never a service.
-- Tests: `uv run pytest -q` (327 pass). Real-model tests are opt-in: `uv run pytest -m ollama`.
+- Tests: `uv run pytest -q` (329 pass). Real-model tests are opt-in: `uv run pytest -m ollama`.
 - Before a push, `uv run python -m big_brother.pii . --history` must report 0 findings.

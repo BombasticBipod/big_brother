@@ -75,7 +75,7 @@ Each requirement is **open** (no tests yet), **tested** (tests committed; `suite
 
 ## MCP server
 
-Claude Code is the only MCP client. The builder is a backend job the server runs. `big_brother/server.py` uses the `mcp` Python SDK 2.x (`MCPServer`) over stdio: `python -m big_brother.server TARGET`. `scripts/register_mcp.sh TARGET` adds it to the target's `.mcp.json` with `claude mcp add --scope project`. Tools:
+Claude Code is the only MCP client. The builder is a backend job the server runs. `big_brother/server.py` uses the `mcp` Python SDK 2.x (`MCPServer`) over stdio: `python -m big_brother.server TARGET`. `scripts/register_mcp.sh TARGET [SERVER ARGS...]` adds it to the target's `.mcp.json` with `claude mcp add --scope project`, passing any extra arguments (such as `--reference stuck`) to the server. Tools:
 
 - `next_requirement()` returns the next ledger item: tested (possibly stuck) before open.
 - `get_interface(module)` returns a module's `.pyi`, staged version first, capped at 8,000 characters. An empty name lists the modules. Only dotted module names are accepted.

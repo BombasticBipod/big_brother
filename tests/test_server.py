@@ -233,6 +233,19 @@ def test_the_server_speaks_stdio_as_a_subprocess(target):
     assert "build" in names and text == "1 [open] add two numbers"
 
 
+def test_the_reference_mode_reaches_the_server_from_the_command_line(target):
+    import sys
+    from mcp import StdioServerParameters
+
+    params = StdioServerParameters(command=sys.executable, args=[
+        "-m", "big_brother.server", str(target), "--reference", "stuck"])
+
+    async def go():
+        async with Client(params) as client:
+            return {t.name for t in (await client.list_tools()).tools}
+    assert "submit_reference" in anyio.run(go)
+
+
 def test_ollama_starts_once_per_session_and_stops_when_it_ends(target):
     events: list[str] = []
 
@@ -369,7 +382,8 @@ def test_stuck_mode_asks_for_a_reference_only_after_a_stuck_build(target):
     error, _ = call(server, "submit_reference", requirement_id=1, files=REF_GOOD)
     assert error
     _, built = call(server, "build", max_tries=1)
-    assert built.startswith("stuck") and "submit_reference" in built and "1" in built
+    assert built.startswith("stuck") and "submit_reference" in built
+    assert "requirement 1" in built
     error, text = call(server, "submit_reference", requirement_id=1, files=REF_GOOD)
     assert (error, text) == (False, "reference green: 1 tests pass")
     [rec] = [json.loads(l) for l in reference_log_path(target).read_text().splitlines()]
