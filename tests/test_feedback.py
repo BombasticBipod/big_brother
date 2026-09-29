@@ -280,13 +280,17 @@ def test_timeout_kills_the_whole_process_tree(tmp_path):
     assert timed_out
     child = int(pid_file.read_text())
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and Path(f"/proc/{child}").exists():
-        if "Z" in Path(f"/proc/{child}/stat").read_text().split()[2]:
-            break  # a zombie waiting for init to reap it is dead
+    while time.monotonic() < deadline and alive(child):
         time.sleep(0.05)
-    alive = Path(f"/proc/{child}").exists() and "Z" not in Path(
-        f"/proc/{child}/stat").read_text().split()[2]
-    assert not alive
+    assert not alive(child)
+
+
+def alive(pid: int) -> bool:
+    """Running, not a zombie waiting for init to reap it. Reaping can land mid-read."""
+    try:
+        return "Z" not in Path(f"/proc/{pid}/stat").read_text().split()[2]
+    except OSError:
+        return False
 
 
 def test_run_killable_streams_output_to_a_callback(tmp_path):
