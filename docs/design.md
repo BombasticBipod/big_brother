@@ -90,6 +90,20 @@ Refusals are tool errors (`is_error`), clipped to 400 characters, so the writer 
 
 Claude Code's cycle: pick a requirement, write a test, confirm red, commit, build, read a few lines of feedback, write the next test. Every tool result is a few lines.
 
+## Reference answers
+
+The test writer can also hand in its own implementation, kept as training data for small builder models. The server's `--reference` option sets when it asks:
+
+- `none` (default): never. The `submit_reference` tool is not offered.
+- `stuck`: after a stuck build. The stuck summary ends with a request naming the stuck requirements. A requirement with no stuck build is refused.
+- `all`: after every `commit_tests`. Any requirement with tests is accepted.
+
+`submit_reference(requirement_id, files)` takes complete `src/<module>.py` files. Only files the interface declares are accepted, as in the builder, because a stray `src/sitecustomize.py` could fake a green run and poison the data. Content is capped at 100,000 characters per file. It takes the run lock, enforces the suite lock, and runs the locked suite in the sandbox against the submitted files alone: none of the builder's `src/` is copied in, so a wrong reference cannot pass on the builder's code. Each submission, green or red, is appended to `.git/big_brother/reference/references.jsonl` with the requirement id, trigger, locked suite commit, `src/` HEAD, the files, the green flag and the counts. The two commits are enough to rebuild the prompt the builder got. The writer sees "reference green: N tests pass" or the failing test ids.
+
+The builder never sees a reference: the working tree is not touched, the builder's prompt is built only from `interface/`, `src/` and `tests/`, and its sandbox has no `.git`. The writer's deny rules on `.git/big_brother/**` keep it from reading earlier references too.
+
+Cost: a reference is paid in writer tokens, which the design otherwise saves. `stuck` spends them only where the small model fails, which is also the most useful data. Check the model provider's terms before training on its output.
+
 ## Target settings
 
 `python -m big_brother.permissions TARGET` merges into the target's `.claude/settings.json` and adds a rules section to its `CLAUDE.md` once:

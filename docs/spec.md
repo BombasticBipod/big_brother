@@ -39,6 +39,12 @@ big_brother drives a separate *target* project. The target holds `interface/*.py
 - **Streaming.** Ollama and cloud builder replies stream token by token. The server takes `--builder SPEC` and `--stream FILE`, and it gains an `add_requirement` tool.
 - **Windows** (`watch.py`, `windows.py`): terminal windows `tail -f` each stream file. They close when the run ends, even after `kill -9` of the main process. Supported terminals are konsole, gnome-terminal, kitty and xterm. `Windows(None)` opens none.
 
+### Reference answers (branch `reference`, off `run`)
+
+- `python -m big_brother.server TARGET --reference none|stuck|all` sets when the writer is asked for its own `src/`. The default is `none`.
+- The `submit_reference(requirement_id, files)` tool checks the files against the locked suite, on their own, in the sandbox. Every submission is appended to `.git/big_brother/reference/references.jsonl` with a green flag, so red answers are kept but can be filtered out.
+- The builder never sees a reference.
+
 ### Not built yet
 
 - A top-level run command that picks both roles, opens the windows, starts the server and drives the writer. The pieces exist but nothing connects them yet.
@@ -48,5 +54,5 @@ big_brother drives a separate *target* project. The target holds `interface/*.py
 ## Operating rules
 
 - Ollama starts once per run and stops at the end. It is never a service.
-- Tests: `uv run pytest -q` (308 pass). Real-model tests are opt-in: `uv run pytest -m ollama`.
+- Tests: `uv run pytest -q` (327 pass). Real-model tests are opt-in: `uv run pytest -m ollama`.
 - Before a push, `uv run python -m big_brother.pii . --history` must report 0 findings.
