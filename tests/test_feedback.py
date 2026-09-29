@@ -11,7 +11,7 @@ from big_brother.builder import DirtySrc
 from big_brother.feedback import (SUMMARY_BUDGET, FeedbackResult, feedback, feedback_log_path,
                                   interface_names, main, mutant_name, run_killable)
 from big_brother.runlock import BuildBusy, run_lock
-from big_brother.suite_lock import SuiteLock
+from big_brother.suite_lock import SuiteLock, TestsTampered
 
 INTERFACE = {
     "calc.pyi": '''def add(a: int, b: int) -> int: ...
@@ -257,6 +257,33 @@ def test_uncommitted_src_is_refused(tmp_path):
     (repo / "src" / "calc.py").write_text("# edited\n")
     with pytest.raises(DirtySrc):
         feedback(repo, progress=lambda line: None)
+
+
+def test_interface_changed_outside_accept_is_refused(tmp_path):
+    repo = make_target(tmp_path, {"calc.pyi": "def add(a, b): ...\n"},
+                       {"calc.py": "def add(a, b):\n    return a + b\n"}, STRONG_TESTS)
+    pyi = repo / "interface" / "calc.pyi"
+    os.chmod(pyi, 0o644)
+    pyi.write_text("def add(a, b): ...\ndef _secret_helper_marker(x): ...\n")
+    with pytest.raises(TestsTampered):
+        feedback(repo, progress=lambda line: None)
+    assert "_secret_helper_marker" not in pyi.read_text()
+
+
+def test_a_custom_interface_dir_is_guarded_too(tmp_path):
+    repo = make_target(tmp_path, {"calc.pyi": "def add(a, b): ...\n"},
+                       {"calc.py": "def add(a, b):\n    return a + b\n"}, STRONG_TESTS)
+    (repo / "api").mkdir()
+    (repo / "api" / "calc.pyi").write_text("def add(a, b): ...\n")
+    git(repo, "add", "api")
+    git(repo, "commit", "-qm", "api")
+    SuiteLock(repo, interface_dir="api").lock()
+    pyi = repo / "api" / "calc.pyi"
+    os.chmod(pyi.parent, 0o755)
+    os.chmod(pyi, 0o644)
+    pyi.write_text("def add(a, b): ...\ndef _secret_helper_marker(x): ...\n")
+    with pytest.raises(TestsTampered):
+        feedback(repo, interface_dir="api", progress=lambda line: None)
 
 
 def test_refused_while_a_build_runs(tmp_path):

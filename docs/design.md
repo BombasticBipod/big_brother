@@ -24,7 +24,7 @@ Note: these rules apply to the *target* project that big_brother drives, not to 
 
 ## Interface and red check
 
-A target project's `interface/` holds `.pyi` files (signatures, docstrings, classes, constants) written by the test writer. The interface is contract, like `tests/`: the builder must not write it. The suite lock guards one directory today and `accept()` commits only that directory, so before step 6 the lock must cover `interface/` and `tests/` together, because the test writer changes them together.
+A target project's `interface/` holds `.pyi` files (signatures, docstrings, classes, constants) written by the test writer. The interface is contract, like `tests/`: the builder must not write it. The suite lock covers `interface/` and `tests/` together, and `accept()` commits both, because the test writer changes them together. The lock state still keys the commit by the tests directory, so a lock made before it covered the interface reads as locked and now guards both.
 
 `make_stubs` turns each `.pyi` into a module whose function bodies raise `NotImplementedError("<qualified name>")`. `red_check` copies `tests/` and the stubs into a temporary directory and runs only the named test files there, with a clean environment (`PYTHONPATH` set to the stubs only, no inherited pytest options, no root conftest or pytest config from the target). The real `src/` is never importable, so a test cannot pass by reaching real code and no implementation text reaches the result. Only exception types and one-line messages are recorded, never tracebacks.
 
@@ -52,7 +52,7 @@ Results are named only by what the interface declares: `calc.sign`, `calc.Counte
 
 mutmut is pinned to 3.8 because the parser reads mutmut's internal mutant names (`<module>.x_<function>__mutmut_<n>`, `<module>.xǁ<Class>ǁ<method>__mutmut_<n>`).
 
-Limit: the interface names are read from the working tree's `interface/`, while `src/` and `tests/` come from HEAD. Once the suite lock covers `interface/` (before step 6), read it from HEAD too.
+The interface names are read from the working tree's `interface/`. That matches the locked commit, because `feedback` enforces the suite lock, which covers `interface/`, before it reads anything.
 
 ## Requirements ledger
 
