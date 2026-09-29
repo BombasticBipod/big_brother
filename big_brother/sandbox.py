@@ -6,9 +6,10 @@ relative writes only; an absolute path still reaches anything the user can.
 `sandboxed(cmd, writable, cwd)` wraps a command in `bwrap` so it sees:
 
 - `/usr` (and the `/bin`, `/lib`, `/lib64`, `/sbin` links into it), read-only;
-- the virtualenv big_brother runs in and big_brother's own package, read-only,
-  at their real paths, so the same interpreter, pytest, coverage and mutmut
-  work unchanged;
+- the virtualenv big_brother runs in, the Python it was built from (when that
+  lives outside `/usr`, as a uv-managed Python does) and big_brother's own
+  package, read-only, at their real paths, so the same interpreter, pytest,
+  coverage and mutmut work unchanged;
 - fresh `/proc`, `/dev` and an empty `/tmp`;
 - the one writable directory, at its real path.
 
@@ -49,6 +50,7 @@ def require_bwrap() -> str:
 def sandboxed(cmd: list[str], writable: Path | str, cwd: Path | str) -> list[str]:
     bwrap = require_bwrap()
     venv = Path(sys.prefix).resolve()
+    base = Path(sys.base_prefix).resolve()
     package = Path(big_brother.__file__).resolve().parent
     args = [bwrap, "--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
             "--ro-bind", "/usr", "/usr"]
@@ -58,7 +60,10 @@ def sandboxed(cmd: list[str], writable: Path | str, cwd: Path | str) -> list[str
         elif Path(link).is_dir():
             args += ["--ro-bind", link, link]
     args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/dev/shm", "--tmpfs", "/tmp",
-             "--ro-bind", str(venv), str(venv), "--ro-bind", str(package), str(package),
-             "--bind", str(Path(writable).resolve()), str(Path(writable).resolve()),
+             "--ro-bind", str(venv), str(venv), "--ro-bind", str(package), str(package)]
+    if not base.is_relative_to("/usr"):
+        args += ["--ro-bind", str(base), str(base)]
+    writable = str(Path(writable).resolve())
+    args += ["--bind", writable, writable,
              "--remount-ro", "/", "--chdir", str(Path(cwd).resolve()), "--"]
     return args + cmd

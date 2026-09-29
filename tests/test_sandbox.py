@@ -85,3 +85,16 @@ def test_missing_bubblewrap_is_an_error_not_a_silent_fallback(work, monkeypatch)
     monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
     with pytest.raises(SandboxUnavailable):
         sandboxed([sys.executable, "-c", "pass"], writable=work, cwd=work)
+
+
+def test_a_base_python_outside_usr_is_mounted_read_only(work, tmp_path, monkeypatch):
+    base = tmp_path / "uv-python"
+    base.mkdir()
+    monkeypatch.setattr(sandbox.sys, "base_prefix", str(base))
+    args = sandboxed(["true"], writable=work, cwd=work)
+    assert any(args[i:i + 3] == ["--ro-bind", str(base), str(base)] for i in range(len(args)))
+
+
+def test_a_base_python_under_usr_needs_no_extra_mount(work, monkeypatch):
+    monkeypatch.setattr(sandbox.sys, "base_prefix", "/usr")
+    assert sandboxed(["true"], writable=work, cwd=work).count("/usr") == 2   # the /usr bind only
