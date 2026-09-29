@@ -89,6 +89,19 @@ Refusals are tool errors (`is_error`), clipped to 400 characters, so the writer 
 
 Claude Code's cycle: pick a requirement, write a test, confirm red, commit, build, read a few lines of feedback, write the next test. Every tool result is a few lines.
 
+## Target settings
+
+`python -m big_brother.permissions TARGET` merges into the target's `.claude/settings.json` and adds a rules section to its `CLAUDE.md` once:
+
+- `permissions.deny`: `Read(/src/**)`, `Read(/.git/big_brother/**)`, and `Edit` of `src/`, `tests/` and `interface/`, so suite changes go through the MCP tools. A `/path` rule in project settings anchors at the target's root. Claude Code applies Read deny rules to its file tools, best-effort to Grep and Glob, and to Bash file commands it recognizes (`cat`, `head`, `tail`, `sed`, redirections). It does not apply them to `grep -r x .` or to a script that opens files itself.
+- `sandbox`: enabled, `allowUnsandboxedCommands: false`, and `filesystem.denyRead` of `./src` and `./.git/big_brother`, which closes that gap at the OS level for every Bash command and its children. On Linux the sandbox needs `bubblewrap` and `socat`.
+
+The MCP server runs outside Claude Code's sandbox, so builds and feedback still read `src/`. The tests check the files written, not that Claude Code enforces them.
+
+## End to end
+
+`python -m big_brother.e2e TARGET` creates a toy target (an interface for `calc.add`, a locked suite, one requirement) and plays the test writer against the real server subprocess over stdio: next_requirement, get_interface, propose_test, commit_tests, build, feedback, next_requirement. Each step is printed and logged to `TARGET/.git/big_brother/e2e.log`. The real-model run is also an opt-in test (`pytest -m ollama`).
+
 ## Build order
 
 1. Suite lock: `tests/` locked at all times, unlocked only to accept committed changes; tampering detected and reverted. (Done.)
@@ -97,8 +110,8 @@ Claude Code's cycle: pick a requirement, write a test, confirm red, commit, buil
 4. Feedback: coverage and mutmut summaries under a size budget. (Done.)
 5. Requirements ledger in SQLite. (Done.)
 6. MCP server wrapping all of it, with permission tests (writes outside the allowed directory are rejected, results stay under budget). (Done.)
-7. End to end on one toy requirement.
-8. Claude Code permission settings denying reads of the target's `src/` and of everything under `.git/big_brother/` (`build.log`, `feedback.log` and any later log), since those logs quote implementation text.
+7. End to end on one toy requirement. (Done.)
+8. Claude Code permission settings denying reads of the target's `src/` and of everything under `.git/big_brother/` (`build.log`, `feedback.log` and any later log), since those logs quote implementation text. (Done.)
 
 ## Operating rules
 
