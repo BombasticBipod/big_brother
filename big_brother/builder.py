@@ -79,6 +79,7 @@ class DirtySrc(Exception):
 
 
 class Model(Protocol):
+    """Chat model. It takes `on_token` only when `build` is given a stream."""
     def chat(self, messages: list[dict]) -> str: ...
 
 
@@ -144,12 +145,18 @@ def parse_reply(text: str, allowed: set[str]) -> tuple[dict[str, str], list[str]
 
 
 def _run_tests(repo: Path, tests_dir: str, src_dir: str, timeout: float,
-               sandbox: bool = True) -> TestRun:
-    """Run the suite in a sandboxed copy of src/ and tests/, reporting paths as the target's."""
+               sandbox: bool = True, src_files: dict[str, str] | None = None) -> TestRun:
+    """Run the suite in a sandboxed copy of src/ and tests/, reporting paths as the target's.
+
+    With `src_files` (target-relative paths), those files stand in for the whole of src/.
+    """
     with tempfile.TemporaryDirectory(prefix="big_brother_build_") as tmp:
         work = Path(tmp) / "work"
         work.mkdir()
-        for d in (src_dir, tests_dir):
+        for rel, body in (src_files or {}).items():
+            (work / rel).parent.mkdir(parents=True, exist_ok=True)
+            (work / rel).write_text(body)
+        for d in (tests_dir,) if src_files is not None else (src_dir, tests_dir):
             if (repo / d).is_dir():
                 shutil.copytree(repo / d, work / d, symlinks=True, copy_function=shutil.copyfile,
                                 ignore=shutil.ignore_patterns("__pycache__"))
@@ -272,8 +279,13 @@ class _Log:
 
 def build(repo: Path | str, model: Model, max_tries: int = 5, tests_dir: str = "tests",
           interface_dir: str = "interface", src_dir: str = "src", timeout: float = 120,
-          progress: Callable[[str], None] = print, sandbox: bool = True) -> BuildResult:
-    """Build src/ until the locked suite is green. sandbox=False exists only to test the guards."""
+          progress: Callable[[str], None] = print, sandbox: bool = True,
+          stream: Callable[[str], None] | None = None) -> BuildResult:
+    """Build src/ until the locked suite is green. sandbox=False exists only to test the guards.
+
+    `stream`, if given, receives the model's reply as it is written plus a header per try and
+    the test counts: it carries implementation text, so it is for the user's window only.
+    """
     repo = Path(repo)
     if sandbox:
         require_bwrap()
@@ -289,7 +301,7 @@ def build(repo: Path | str, model: Model, max_tries: int = 5, tests_dir: str = "
         log.write("build started", f"max_tries={max_tries}")
         try:
             return _loop(repo, model, lock, log, max_tries, tests_dir, interface_dir, src_dir,
-                         timeout, progress, sandbox)
+                         timeout, progress, sandbox, stream)
         except BaseException as err:
             log.write("build aborted", repr(err))
             _restore_src(repo, src_dir)
@@ -298,7 +310,8 @@ def build(repo: Path | str, model: Model, max_tries: int = 5, tests_dir: str = "
 
 def _loop(repo: Path, model: Model, lock: SuiteLock, log: _Log, max_tries: int, tests_dir: str,
           interface_dir: str, src_dir: str, timeout: float,
-          progress: Callable[[str], None], sandbox: bool) -> BuildResult:
+          progress: Callable[[str], None], sandbox: bool,
+          stream: Callable[[str], None] | None = None) -> BuildResult:
     allowed = allowed_paths(repo, interface_dir, src_dir)
     run = _run_tests(repo, tests_dir, src_dir, timeout, sandbox)
     _guard(repo, lock)
@@ -314,7 +327,11 @@ def _loop(repo: Path, model: Model, lock: SuiteLock, log: _Log, max_tries: int, 
         progress(f"{step}: asking the model")
         messages = _prompt(repo, allowed, run, notes, interface_dir, tests_dir)
         log.write(f"{step} prompt", messages[-1]["content"])
-        text = model.chat(messages)
+        if stream:
+            stream(f"\n==== {step} ====\n")
+            text = model.chat(messages, on_token=stream)
+        else:
+            text = model.chat(messages)
         log.write(f"{step} reply", text)
         files, refused = parse_reply(text, allowed)
         for rel, body in files.items():
@@ -332,6 +349,8 @@ def _loop(repo: Path, model: Model, lock: SuiteLock, log: _Log, max_tries: int, 
         _guard(repo, lock)
         log.write(f"{step} test run", run.output)
         progress(f"{step}: {run.passed} passed, {run.failed} failed")
+        if stream:
+            stream(f"\n---- {step}: {run.passed} passed, {run.failed} failed ----\n")
         if run.green:
             _commit_src(repo, src_dir, f"build: green after {_plural(n)}")
             log.write("green")

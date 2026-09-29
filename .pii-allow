@@ -3,3 +3,5 @@
 
 # Commit e2466f0 describes the detector bug it fixed by quoting the false match.
 email n@pytest.fixture
+# A systemd template unit instance name in a claude_hooks test fixture, not an address.
+email telemetry-collector@journal.service

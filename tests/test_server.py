@@ -1,5 +1,6 @@
 """The MCP server gives the test writer short results and never shows it implementation text."""
 import contextlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -10,7 +11,9 @@ from mcp import Client
 
 from big_brother.ledger import Ledger
 from big_brother.red_check import SUMMARY_BUDGET
-from big_brother.server import INTERFACE_BUDGET, make_server, progress_path
+from big_brother.reference import reference_log_path
+from big_brother.server import builder_from_spec, INTERFACE_BUDGET, make_server, progress_path
+from big_brother.server import main as server_main
 from big_brother.staging import Staging, staging_path
 from big_brother.suite_lock import SuiteLock
 
@@ -82,7 +85,7 @@ def tool_names(server) -> set[str]:
 def test_the_server_offers_exactly_the_designed_tools(target):
     assert tool_names(serve(target)) == {
         "next_requirement", "get_interface", "propose_test", "propose_interface",
-        "discard_staged", "commit_tests", "build", "feedback"}
+        "discard_staged", "commit_tests", "build", "feedback", "add_requirement"}
 
 
 def test_next_requirement(target):
@@ -230,6 +233,19 @@ def test_the_server_speaks_stdio_as_a_subprocess(target):
     assert "build" in names and text == "1 [open] add two numbers"
 
 
+def test_the_reference_mode_reaches_the_server_from_the_command_line(target):
+    import sys
+    from mcp import StdioServerParameters
+
+    params = StdioServerParameters(command=sys.executable, args=[
+        "-m", "big_brother.server", str(target), "--reference", "stuck"])
+
+    async def go():
+        async with Client(params) as client:
+            return {t.name for t in (await client.list_tools()).tools}
+    assert "submit_reference" in anyio.run(go)
+
+
 def test_ollama_starts_once_per_session_and_stops_when_it_ends(target):
     events: list[str] = []
 
@@ -287,3 +303,139 @@ def test_without_bubblewrap_tools_refuse_cleanly_and_nothing_is_left_behind(targ
         error, text = call(server, tool)
         assert error and "install bubblewrap" in text
     assert started == []
+
+
+# goal splitting and the builder stream
+
+def test_add_requirement_adds_to_the_ledger(target):
+    assert call(serve(target), "add_requirement", text="subtract two numbers") == (False, "added 2")
+    assert [r.text for r in Ledger(target).all()][-1] == "subtract two numbers"
+
+
+def test_add_requirement_refuses_empty_and_long_text(target):
+    assert call(serve(target), "add_requirement", text="  ")[0]
+    assert call(serve(target), "add_requirement", text="x" * 501)[0]
+    assert len(Ledger(target).all()) == 1
+
+
+class StreamingModel(FakeModel):
+    def chat(self, messages, on_token=None):
+        text = super().chat(messages)
+        if on_token:
+            on_token(text)
+        return text
+
+
+def test_build_streams_the_model_reply_to_the_stream_file(target, tmp_path):
+    stream = target / ".git" / "big_brother" / "streams" / "builder.log"
+    stream.parent.mkdir(parents=True)
+    server = make_server(target, model=StreamingModel(GOOD), on_demand=no_ollama, stream=stream)
+    call(server, "propose_test", path="tests/test_calc.py", content=TEST_ADD)
+    call(server, "commit_tests", message="t", requirement_id=1)
+    assert call(server, "build", max_tries=2)[1].startswith("green")
+    shown = stream.read_text()
+    assert SECRET in shown and "try 1/2" in shown
+
+
+def test_builder_spec_picks_the_model_and_its_on_demand():
+    model, on_demand = builder_from_spec("ollama:m:1b")
+    assert model.model == "m:1b" and on_demand is not None
+    model, on_demand = builder_from_spec("anthropic:claude-sonnet-5-5", client=object())
+    assert model.model == "claude-sonnet-5-5"
+    with on_demand():
+        pass
+
+
+# reference answers from the test writer
+
+REF_GOOD = {"src/calc.py": "def add(a, b):\n    return a + b  # REFERENCE_SENTINEL\n"}
+
+
+def with_reference(target: Path, mode: str, *replies: str):
+    return make_server(target, model=FakeModel(*(replies or (GOOD,))), on_demand=no_ollama,
+                       reference=mode)
+
+
+def committed_with(target: Path, mode: str, *replies: str):
+    server = with_reference(target, mode, *replies)
+    call(server, "propose_test", path="tests/test_add.py", content=TEST_ADD)
+    commit = call(server, "commit_tests", message="test add", requirement_id=1)
+    return server, commit
+
+
+def test_an_unknown_reference_mode_is_refused_before_anything_starts(target):
+    with pytest.raises(ValueError, match="none, stuck, all"):
+        with_reference(target, "sometimes")
+    with pytest.raises(SystemExit):
+        server_main([str(target), "--reference", "sometimes"])
+
+
+def test_submit_reference_is_offered_only_when_a_mode_asks_for_it(target):
+    assert "submit_reference" not in tool_names(with_reference(target, "none"))
+    assert "submit_reference" in tool_names(with_reference(target, "stuck"))
+    assert "submit_reference" in tool_names(with_reference(target, "all"))
+
+
+def test_stuck_mode_asks_for_a_reference_only_after_a_stuck_build(target):
+    server, (_, commit) = committed_with(target, "stuck", BAD)
+    assert "submit_reference" not in commit
+    error, _ = call(server, "submit_reference", requirement_id=1, files=REF_GOOD)
+    assert error
+    _, built = call(server, "build", max_tries=1)
+    assert built.startswith("stuck") and "submit_reference" in built
+    assert "requirement 1" in built
+    error, text = call(server, "submit_reference", requirement_id=1, files=REF_GOOD)
+    assert (error, text) == (False, "reference green: 1 tests pass")
+    [rec] = [json.loads(l) for l in reference_log_path(target).read_text().splitlines()]
+    assert rec["trigger"] == "stuck" and rec["requirement_id"] == 1
+
+
+def test_all_mode_asks_for_a_reference_after_every_commit(target):
+    error, text = call(with_reference(target, "all"), "submit_reference",
+                       requirement_id=1, files=REF_GOOD)
+    assert error                               # still open: no tests yet
+    server, (_, commit) = committed_with(target, "all")
+    assert "submit_reference" in commit
+    error, text = call(server, "submit_reference", requirement_id=1, files=REF_GOOD)
+    assert (error, text) == (False, "reference green: 1 tests pass")
+    assert call(server, "submit_reference", requirement_id=99, files=REF_GOOD)[0]
+
+
+def test_none_mode_never_asks(target):
+    server, (_, commit) = committed_with(target, "none", BAD)
+    assert "submit_reference" not in commit
+    assert "submit_reference" not in call(server, "build", max_tries=1)[1]
+
+
+def test_the_reference_hint_survives_a_long_stuck_summary(target):
+    many = "from calc import add\n\n" + "".join(
+        f"\ndef test_{'long_name_' * 4}{i}():\n    assert add({i}, 1) == {i + 1}\n"
+        for i in range(40))
+    server = with_reference(target, "stuck", BAD)
+    call(server, "propose_test", path="tests/test_add.py", content=many)
+    call(server, "commit_tests", message="many", requirement_id=1)
+    _, built = call(server, "build", max_tries=1)
+    assert "submit_reference" in built and len(built) <= SUMMARY_BUDGET
+
+
+class RecordingModel(FakeModel):
+    def __init__(self, *replies: str):
+        super().__init__(*replies)
+        self.seen = []
+
+    def chat(self, messages):
+        self.seen.append(messages)
+        return super().chat(messages)
+
+
+def test_the_builder_never_sees_a_reference(target):
+    model = RecordingModel(BAD, BAD)
+    server = make_server(target, model=model, on_demand=no_ollama, reference="stuck")
+    call(server, "propose_test", path="tests/test_add.py", content=TEST_ADD)
+    call(server, "commit_tests", message="t", requirement_id=1)
+    call(server, "build", max_tries=1)
+    assert not call(server, "submit_reference", requirement_id=1, files=REF_GOOD)[0]
+    assert git(target, "status", "--porcelain", "--untracked-files=all") == ""
+    call(server, "build", max_tries=1)
+    assert len(model.seen) == 2
+    assert all("REFERENCE_SENTINEL" not in m["content"] for msgs in model.seen for m in msgs)

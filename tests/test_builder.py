@@ -458,3 +458,28 @@ def test_main_exit_codes(target, capsys):
     assert "stuck after 1 try" in capsys.readouterr().out
     assert main([str(target)], client=FakeModel(GOOD), on_demand=none) == 0
     assert "green after 1 try" in capsys.readouterr().out
+
+
+# streaming to the builder window
+
+class StreamingModel(FakeModel):
+    def chat(self, messages: list[dict], on_token=None) -> str:
+        text = super().chat(messages)
+        if on_token:
+            for i in range(0, len(text), 5):
+                on_token(text[i:i + 5])
+        return text
+
+
+def test_stream_gets_the_model_tokens_a_header_per_try_and_the_counts(target):
+    seen: list[str] = []
+    result = run(target, StreamingModel(BAD, GOOD), stream=seen.append)
+    assert result.status == "green"
+    shown = "".join(seen)
+    assert "try 1/5" in shown and "try 2/5" in shown
+    assert BAD in shown and GOOD in shown
+    assert "2 passed, 0 failed" in shown
+
+
+def test_without_a_stream_the_model_is_called_without_on_token(target):
+    assert run(target, FakeModel(GOOD)).status == "green"

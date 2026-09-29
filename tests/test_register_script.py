@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "register_mcp.sh"
 
 
-def test_register_calls_claude_mcp_add_in_the_target(tmp_path):
+def register(tmp_path: Path, *extra: str) -> tuple[Path, list[str]]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     record = tmp_path / "args"
@@ -17,12 +17,22 @@ def test_register_calls_claude_mcp_add_in_the_target(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-    subprocess.run(["sh", str(SCRIPT), str(target)], check=True, env=env, capture_output=True)
-    lines = record.read_text().splitlines()
+    subprocess.run(["sh", str(SCRIPT), str(target), *extra], check=True, env=env,
+                   capture_output=True)
+    return target, record.read_text().splitlines()
+
+
+def test_register_calls_claude_mcp_add_in_the_target(tmp_path):
+    target, lines = register(tmp_path)
     assert lines[0] == str(target)
     assert lines[1:] == ["mcp", "add", "--scope", "project", "--transport", "stdio", "big_brother",
                          "--", "uv", "--directory", str(ROOT), "run", "python", "-m",
                          "big_brother.server", str(target)]
+
+
+def test_register_passes_extra_arguments_to_the_server(tmp_path):
+    target, lines = register(tmp_path, "--reference", "stuck")
+    assert lines[-3:] == [str(target), "--reference", "stuck"]
 
 
 def test_register_needs_an_existing_target(tmp_path):

@@ -6,6 +6,8 @@ writer must not see `src/`. Refusals come back as tool errors (`is_error`),
 clipped to the same budget, so the writer can read them and try again.
 
 Tools:
+- `add_requirement(text)`: record one requirement, so a writer given a goal
+  can split it into ledger items itself.
 - `next_requirement()`: the next ledger item, stuck or tested work first.
 - `get_interface(module)`: a module's `.pyi`, staged version first; with an
   empty module name, the list of modules.
@@ -18,6 +20,12 @@ Tools:
 - `build(max_tries)`: run the builder loop with the local model. Green marks
   every tested requirement done; stuck counts against each of them.
 - `feedback()`: coverage and surviving mutants, by interface name.
+- `submit_reference(requirement_id, files)`: only with `--reference stuck` or
+  `--reference all`. The writer's own `src/` for a requirement, run against
+  the locked suite on its own and stored as training data under
+  `.git/big_brother/reference/` (see `big_brother.reference`). `stuck` asks
+  for one in the result of a stuck build, `all` in the result of every
+  `commit_tests`. The builder never sees it.
 
 Ollama starts on the first `build` of a session and stays up for the rest of
 it; the session's end stops it, and only if the server started it. A session
@@ -28,7 +36,13 @@ A stdio MCP server must never write to stdout, which carries the protocol.
 Build and feedback progress goes to `.git/big_brother/progress.log`, which the
 user can follow with `tail -f`; it holds counts only.
 
-Usage: python -m big_brother.server TARGET
+`--builder SPEC` picks the builder (`ollama:MODEL` or `anthropic:MODEL`, see
+`big_brother.roles`); `--stream FILE` appends the builder's reply to FILE as
+it is written, for the user's builder window. That file carries implementation
+text, so it must live under `.git/big_brother/`, which the writer cannot read.
+
+Usage: python -m big_brother.server TARGET [--builder SPEC] [--stream FILE]
+                                    [--reference none|stuck|all]
 """
 from __future__ import annotations
 
@@ -40,7 +54,7 @@ import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractContextManager, ExitStack, asynccontextmanager
+from contextlib import AbstractContextManager, ExitStack, asynccontextmanager, nullcontext
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -51,7 +65,9 @@ from big_brother.feedback import feedback as run_feedback
 from big_brother.ledger import Ledger, LedgerError
 from big_brother.ollama import OllamaClient, OllamaError, ollama_on_demand
 from big_brother.red_check import SUMMARY_BUDGET, _clip
+from big_brother.reference import MODES, submit as submit_reference_files
 from big_brother.runlock import BuildBusy
+from big_brother.roles import make_builder
 from big_brother.sandbox import SandboxUnavailable, require_bwrap
 from big_brother.staging import Staging, StagingError
 from big_brother.suite_lock import NotLocked, TestsTampered
@@ -62,8 +78,10 @@ MODULE = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
 REFUSALS = (StagingError, LedgerError, BuildBusy, TestsTampered, DirtySrc, NotLocked,
             OllamaError, SandboxUnavailable, ValueError)
 
+REQUIREMENT_BUDGET = 500   # characters of one requirement added by the writer
+
 INSTRUCTIONS = """You write pytest tests for a project whose implementation you never see.
-Cycle: next_requirement, get_interface, propose_interface if the interface needs a change,
+Split a goal into requirements with add_requirement. Cycle: next_requirement, get_interface, propose_interface if the interface needs a change,
 propose_test until it reports red, commit_tests, build, feedback, then the next test."""
 
 
@@ -83,19 +101,54 @@ def _progress_writer(repo: Path, job: str) -> Callable[[str], None]:
     return write
 
 
+def builder_from_spec(spec: str, client=None) -> tuple[Model, Callable[[], AbstractContextManager]]:
+    """The builder model for a role spec, and how to make sure it is up for a build."""
+    model = make_builder(spec, client=client)
+    if isinstance(model, OllamaClient):
+        return model, lambda: ollama_on_demand(is_up=model.is_up)
+    return model, nullcontext
+
+
+def _stream_writer(path: Path | None) -> Callable[[str], None] | None:
+    if path is None:
+        return None
+
+    def write(text: str) -> None:
+        with open(path, "a") as stream:
+            stream.write(text)
+    return write
+
+
+def _with_hint(summary: str, hint: str) -> str:
+    """Append hint to summary, cutting the summary, never the hint, to fit the budget."""
+    room = SUMMARY_BUDGET - len(hint) - 2
+    if len(summary) > room:
+        summary = summary[:room - 3] + "..."
+    return f"{summary}; {hint}"
+
+
+def _reference_hint(ids: list[int]) -> str:
+    return (f"reference wanted for requirement {', '.join(map(str, ids))}: call submit_reference "
+            f"with your own complete src files")
+
+
 def _refuse(err: Exception) -> ToolError:
     return ToolError(_clip(str(err), ERROR_BUDGET))
 
 
 def make_server(repo: Path | str, model: Model | None = None,
                 on_demand: Callable[[], AbstractContextManager] | None = None,
-                tests_dir: str = "tests", interface_dir: str = "interface") -> MCPServer:
+                tests_dir: str = "tests", interface_dir: str = "interface",
+                stream: Path | str | None = None, reference: str = "none") -> MCPServer:
+    if reference not in MODES:
+        raise ValueError(f"reference mode {reference!r}: use one of {', '.join(MODES)}")
     repo = Path(repo).resolve()
     if model is None:
         client = OllamaClient()
         model, on_demand = client, on_demand or (lambda: ollama_on_demand(is_up=client.is_up))
     start_model = on_demand or ollama_on_demand
     staging = Staging(repo, tests_dir, interface_dir)
+    stream_to = _stream_writer(Path(stream) if stream else None)
     model_up = ExitStack()
     model_lock = threading.Lock()
     started = False
@@ -138,6 +191,16 @@ def make_server(repo: Path | str, model: Model | None = None,
             return "no open requirements"
         stuck = f" (stuck builds: {req.stuck_builds})" if req.stuck_builds else ""
         return _clip(f"{req.id} [{req.status}] {req.text}{stuck}", SUMMARY_BUDGET)
+
+    @server.tool()
+    def add_requirement(text: str) -> str:
+        """Record one requirement (one behavior) in the ledger; returns its id."""
+        text = " ".join(text.split())
+        if not text:
+            raise ToolError("give the requirement text")
+        if len(text) > REQUIREMENT_BUDGET:
+            raise ToolError(f"keep a requirement under {REQUIREMENT_BUDGET} characters; split it")
+        return f"added {ledger().add(text)}"
 
     @server.tool()
     def get_interface(module: str) -> str:
@@ -187,7 +250,8 @@ def make_server(repo: Path | str, model: Model | None = None,
             ledger().tests_committed(requirement_id, commit)
         except REFUSALS as err:
             raise _refuse(err) from None
-        return f"committed {commit[:12]} for requirement {requirement_id}"
+        text = f"committed {commit[:12]} for requirement {requirement_id}"
+        return _with_hint(text, _reference_hint([requirement_id])) if reference == "all" else text
 
     @server.tool()
     def build(max_tries: int = 5) -> str:
@@ -197,7 +261,7 @@ def make_server(repo: Path | str, model: Model | None = None,
             ensure_model()
             result = run_build(repo, model, max_tries=max_tries, tests_dir=tests_dir,
                                interface_dir=interface_dir,
-                               progress=_progress_writer(repo, "build"))
+                               progress=_progress_writer(repo, "build"), stream=stream_to)
         except REFUSALS as err:
             raise _refuse(err) from None
         book = ledger()
@@ -210,6 +274,8 @@ def make_server(repo: Path | str, model: Model | None = None,
         else:
             for req in tested:
                 book.build_stuck(req.id)
+            if reference != "none" and tested:
+                return _with_hint(result.summary, _reference_hint([r.id for r in tested]))
         return result.summary
 
     @server.tool()
@@ -221,15 +287,43 @@ def make_server(repo: Path | str, model: Model | None = None,
         except REFUSALS as err:
             raise _refuse(err) from None
 
+    if reference == "none":
+        return server
+
+    @server.tool()
+    def submit_reference(requirement_id: int, files: dict[str, str]) -> str:
+        """Your own implementation for a requirement, as {"src/<module>.py": complete file}.
+
+        It runs against the locked suite on its own and is kept as training data; the
+        builder never sees it. Accepted after a stuck build (stuck mode) or once the
+        requirement has tests (all mode).
+        """
+        try:
+            req = ledger().get(requirement_id)
+            if reference == "stuck" and not req.stuck_builds:
+                raise LedgerError(f"requirement {requirement_id} has no stuck build")
+            if req.status == "open":
+                raise LedgerError(f"requirement {requirement_id} has no tests yet")
+            return submit_reference_files(repo, files, requirement_id, reference,
+                                          tests_dir=tests_dir, interface_dir=interface_dir).summary
+        except REFUSALS as err:
+            raise _refuse(err) from None
+
     return server
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Serve one target project to Claude Code.")
     parser.add_argument("target")
+    parser.add_argument("--builder", default=None, help="builder role spec, e.g. ollama:MODEL")
+    parser.add_argument("--stream", default=None, help="file the builder's reply streams to")
+    parser.add_argument("--reference", default="none", choices=MODES,
+                        help="when to ask the writer for its own src/ as training data")
     args = parser.parse_args(argv)
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
-    make_server(args.target).run("stdio")
+    model, on_demand = builder_from_spec(args.builder) if args.builder else (None, None)
+    make_server(args.target, model=model, on_demand=on_demand, stream=args.stream,
+                reference=args.reference).run("stdio")
 
 
 if __name__ == "__main__":

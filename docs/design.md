@@ -75,7 +75,7 @@ Each requirement is **open** (no tests yet), **tested** (tests committed; `suite
 
 ## MCP server
 
-Claude Code is the only MCP client. The builder is a backend job the server runs. `big_brother/server.py` uses the `mcp` Python SDK 2.x (`MCPServer`) over stdio: `python -m big_brother.server TARGET`. `scripts/register_mcp.sh TARGET` adds it to the target's `.mcp.json` with `claude mcp add --scope project`. Tools:
+Claude Code is the only MCP client. The builder is a backend job the server runs. `big_brother/server.py` uses the `mcp` Python SDK 2.x (`MCPServer`) over stdio: `python -m big_brother.server TARGET`. `scripts/register_mcp.sh TARGET [SERVER ARGS...]` adds it to the target's `.mcp.json` with `claude mcp add --scope project`, passing any extra arguments (such as `--reference stuck`) to the server. Tools:
 
 - `next_requirement()` returns the next ledger item: tested (possibly stuck) before open.
 - `get_interface(module)` returns a module's `.pyi`, staged version first, capped at 8,000 characters. An empty name lists the modules. Only dotted module names are accepted.
@@ -89,6 +89,20 @@ Claude Code is the only MCP client. The builder is a backend job the server runs
 Refusals are tool errors (`is_error`), clipped to 400 characters, so the writer reads them and retries. Results stay within the 500-character summary budget, except `get_interface`. Stdout carries the protocol, so build and feedback progress (counts only) goes to `.git/big_brother/progress.log` for the user to `tail -f`. Stdio servers have no per-call timeout in Claude Code (the default wall-clock limit is about 28 hours), so `build` and `feedback` run synchronously.
 
 Claude Code's cycle: pick a requirement, write a test, confirm red, commit, build, read a few lines of feedback, write the next test. Every tool result is a few lines.
+
+## Reference answers
+
+The test writer can also hand in its own implementation, kept as training data for small builder models. The server's `--reference` option sets when it asks:
+
+- `none` (default): never. The `submit_reference` tool is not offered.
+- `stuck`: after a stuck build. The stuck summary ends with a request naming the stuck requirements. A requirement with no stuck build is refused.
+- `all`: after every `commit_tests`. Any requirement with tests is accepted.
+
+`submit_reference(requirement_id, files)` takes complete `src/<module>.py` files. Only files the interface declares are accepted, as in the builder, because a stray `src/sitecustomize.py` could fake a green run and poison the data. Content is capped at 100,000 characters per file. It takes the run lock, enforces the suite lock, and runs the locked suite in the sandbox against the submitted files alone: none of the builder's `src/` is copied in, so a wrong reference cannot pass on the builder's code. Each submission, green or red, is appended to `.git/big_brother/reference/references.jsonl` with the requirement id, trigger, locked suite commit, `src/` HEAD, the files, the green flag and the counts. The two commits are enough to rebuild the prompt the builder got. The writer sees "reference green: N tests pass" or the failing test ids.
+
+The builder never sees a reference: the working tree is not touched, the builder's prompt is built only from `interface/`, `src/` and `tests/`, and its sandbox has no `.git`. The writer's deny rules on `.git/big_brother/**` keep it from reading earlier references too.
+
+Cost: a reference is paid in writer tokens, which the design otherwise saves. `stuck` spends them only where the small model fails, which is also the most useful data. Check the model provider's terms before training on its output.
 
 ## Target settings
 
