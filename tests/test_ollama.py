@@ -11,7 +11,7 @@ from big_brother.ollama import OllamaClient, OllamaError, ollama_on_demand
 class FakeOllama:
     """A tiny HTTP server that records requests and answers like Ollama."""
 
-    def __init__(self, status=200, reply="hello"):
+    def __init__(self, status=200, reply="hello", tool_calls=None):
         self.requests: list[tuple[str, str, dict | None]] = []
         fake = self
 
@@ -34,8 +34,22 @@ class FakeOllama:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 fake.requests.append(("POST", self.path, body))
-                if status == 200:
-                    self._answer(200, {"message": {"role": "assistant", "content": reply}})
+                message = {"role": "assistant", "content": reply}
+                if tool_calls:
+                    message["tool_calls"] = tool_calls
+                if status == 200 and body.get("stream"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-ndjson")
+                    self.end_headers()
+                    for i in range(0, len(reply), 3):
+                        chunk = {"message": {"role": "assistant", "content": reply[i:i + 3]},
+                                 "done": False}
+                        self.wfile.write(json.dumps(chunk).encode() + b"\n")
+                        self.wfile.flush()
+                    self.wfile.write(json.dumps({"message": {"role": "assistant", "content": ""},
+                                                 "done": True}).encode() + b"\n")
+                elif status == 200:
+                    self._answer(200, {"message": message})
                 else:
                     self._answer(status, {"error": f"model '{body['model']}' not found"})
 
@@ -65,6 +79,37 @@ def test_chat_posts_model_messages_and_context_size(fake):
     assert body["messages"] == msgs
     assert body["stream"] is False
     assert body["options"]["num_ctx"] == 4321
+
+
+def test_chat_streams_chunks_to_on_token_and_returns_the_whole_reply(fake):
+    tokens = []
+    text = OllamaClient(host=fake.host).chat([{"role": "user", "content": "hi"}],
+                                             on_token=tokens.append)
+    assert text == "FILE: src/a.py"
+    assert tokens == ["FIL", "E: ", "src", "/a.", "py"]
+    assert fake.requests[-1][2]["stream"] is True
+
+
+def test_streamed_missing_model_still_names_the_pull_script():
+    server = FakeOllama(status=404)
+    try:
+        with pytest.raises(OllamaError, match="scripts/pull_model.sh"):
+            OllamaClient(host=server.host, model="nope:1b").chat([], on_token=lambda t: None)
+    finally:
+        server.close()
+
+
+def test_chat_message_sends_tools_and_returns_the_tool_calls():
+    calls = [{"function": {"name": "next_requirement", "arguments": {}}}]
+    server = FakeOllama(reply="", tool_calls=calls)
+    tools = [{"type": "function", "function": {"name": "next_requirement", "parameters": {}}}]
+    try:
+        message = OllamaClient(host=server.host).chat_message([], tools=tools)
+    finally:
+        server.close()
+    assert message["tool_calls"] == calls
+    body = server.requests[-1][2]
+    assert body["tools"] == tools and body["stream"] is False
 
 
 def test_is_up_true_when_server_answers(fake):

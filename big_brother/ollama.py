@@ -1,7 +1,10 @@
 """Talk to the local Ollama server, and run it only for the length of a build.
 
-`OllamaClient.chat` posts to `/api/chat` without streaming and returns the
-reply text. The context size is always sent: a server default that is too
+`OllamaClient.chat` posts to `/api/chat` and returns the reply text. Given
+`on_token`, it streams: each chunk goes to `on_token` as it arrives, so a
+window can show the model writing. `chat_message` sends tool definitions and
+returns the whole reply message, tool calls included, for a model that plays
+the test writer. The context size is always sent: a server default that is too
 small silently drops the front of a long prompt, where the format rules are.
 
 `ollama_on_demand` starts `ollama serve` only if nothing answers, waits for it,
@@ -44,18 +47,40 @@ class OllamaClient:
         except (urllib.error.URLError, OSError):
             return False
 
-    def chat(self, messages: list[dict]) -> str:
-        body = json.dumps({
+    def chat(self, messages: list[dict],
+             on_token: Callable[[str], None] | None = None) -> str:
+        if on_token is None:
+            return self._post(messages, stream=False)["message"]["content"]
+        return self._post(messages, stream=True, on_token=on_token)
+
+    def chat_message(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+        return self._post(messages, stream=False, tools=tools)["message"]
+
+    def _post(self, messages: list[dict], stream: bool, tools: list[dict] | None = None,
+              on_token: Callable[[str], None] | None = None):
+        payload = {
             "model": self.model,
             "messages": messages,
-            "stream": False,
+            "stream": stream,
             "options": {"num_ctx": self.num_ctx, "temperature": self.temperature},
-        }).encode()
-        request = urllib.request.Request(self.host + "/api/chat", data=body,
+        }
+        if tools:
+            payload["tools"] = tools
+        request = urllib.request.Request(self.host + "/api/chat", data=json.dumps(payload).encode(),
                                          headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read())["message"]["content"]
+                if not stream:
+                    return json.loads(response.read())
+                parts = []
+                for line in response:
+                    if not line.strip():
+                        continue
+                    piece = json.loads(line).get("message", {}).get("content", "")
+                    if piece:
+                        parts.append(piece)
+                        on_token(piece)
+                return "".join(parts)
         except urllib.error.HTTPError as err:
             if err.code == 404:
                 raise OllamaError(f"model {self.model} not found; pull it with "
