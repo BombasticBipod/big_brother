@@ -227,3 +227,71 @@ def test_pytest_runs_against_locked_suite(repo, lock):
                             cwd=repo, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert lock.changes() == []
+
+
+# the interface is contract too
+
+@pytest.fixture
+def with_interface(repo) -> Path:
+    (repo / "interface").mkdir()
+    (repo / "interface" / "a.pyi").write_text("def f() -> int: ...\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "interface")
+    return repo
+
+
+def test_lock_covers_the_interface(with_interface):
+    SuiteLock(with_interface).lock()
+    assert not writable(with_interface / "interface")
+    assert not writable(with_interface / "interface" / "a.pyi")
+    assert writable(with_interface / "src" / "a.py")
+
+
+def test_interface_tampering_is_reverted(with_interface):
+    lock = SuiteLock(with_interface)
+    lock.lock()
+    tamper(with_interface, "interface/a.pyi", "def f() -> str: ...\n")
+    tamper(with_interface, "interface/b.pyi", "def g() -> int: ...\n")
+    with pytest.raises(TestsTampered) as err:
+        lock.enforce()
+    assert err.value.paths == ["interface/a.pyi", "interface/b.pyi"]
+    assert (with_interface / "interface" / "a.pyi").read_text() == "def f() -> int: ...\n"
+    assert not (with_interface / "interface" / "b.pyi").exists()
+
+
+def test_accept_commits_interface_and_tests_together(with_interface):
+    lock = SuiteLock(with_interface)
+    lock.lock()
+    with lock.accept("add g"):
+        (with_interface / "interface" / "b.pyi").write_text("def g() -> int: ...\n")
+        (with_interface / "tests" / "test_g.py").write_text("def test_g(): pass\n")
+    assert git(with_interface, "show", "--name-only", "--format=", "HEAD").split() == [
+        "interface/b.pyi", "tests/test_g.py"]
+    assert lock.base == git(with_interface, "rev-parse", "HEAD").strip()
+    assert not writable(with_interface / "interface" / "b.pyi")
+
+
+def test_accept_can_create_the_interface_directory(repo, lock):
+    with lock.accept("first interface"):
+        (repo / "interface").mkdir()
+        (repo / "interface" / "a.pyi").write_text("def f() -> int: ...\n")
+    assert "interface/a.pyi" in git(repo, "show", "--name-only", "--format=", "HEAD")
+    assert not writable(repo / "interface")
+
+
+def test_a_lock_made_before_the_interface_was_covered_still_guards_it(with_interface):
+    head = git(with_interface, "rev-parse", "HEAD").strip()
+    state = with_interface / ".git" / "big_brother" / "suite_lock.json"
+    state.parent.mkdir()
+    state.write_text('{"tests": "%s"}\n' % head)   # the old format: one key per tests dir
+    lock = SuiteLock(with_interface)
+    assert lock.is_locked()
+    tamper(with_interface, "interface/a.pyi", "changed\n")
+    assert lock.changes() == ["interface/a.pyi"]
+
+
+def test_src_changes_are_not_contract_changes(with_interface):
+    lock = SuiteLock(with_interface)
+    lock.lock()
+    (with_interface / "src" / "a.py").write_text("x = 2\n")
+    assert lock.changes() == []

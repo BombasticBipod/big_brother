@@ -231,7 +231,7 @@ def build(repo: Path | str, model: Model, max_tries: int = 5, tests_dir: str = "
           interface_dir: str = "interface", src_dir: str = "src", timeout: float = 120,
           progress: Callable[[str], None] = print) -> BuildResult:
     repo = Path(repo)
-    lock = SuiteLock(repo, tests_dir)
+    lock = SuiteLock(repo, tests_dir, interface_dir)
     with run_lock(repo):
         lock.enforce()
         if _git(repo, "status", "--porcelain", "--untracked-files=all", "--", src_dir).strip():

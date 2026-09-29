@@ -115,9 +115,10 @@ def test_parse_reply_ignores_a_lone_block_when_several_files_are_declared():
 
 
 def test_allowed_paths_follow_the_interface(target):
-    (target / "interface" / "pkg").mkdir()
-    (target / "interface" / "pkg" / "__init__.pyi").write_text("")
-    (target / "interface" / "pkg" / "util.pyi").write_text("X: int\n")
+    with SuiteLock(target).accept("add pkg"):   # the interface is locked with the tests
+        (target / "interface" / "pkg").mkdir()
+        (target / "interface" / "pkg" / "__init__.pyi").write_text("")
+        (target / "interface" / "pkg" / "util.pyi").write_text("X: int\n")
     assert allowed_paths(target) == {"src/calc.py", "src/pkg/__init__.py", "src/pkg/util.py"}
 
 
