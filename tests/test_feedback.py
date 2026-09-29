@@ -141,6 +141,22 @@ def test_unknown_mutant_key_goes_to_other_code():
     assert mutant_name("calc.something_new__mutmut_1", declared) == "calc (other code)"
 
 
+def test_undeclared_module_names_never_reach_the_writer(tmp_path):
+    src = {"calc.py": "from _private_util_marker import double\n\n\ndef add(a, b):\n"
+                      "    return double(a) // 2 + b\n",
+           "_private_util_marker.py": "def double(x):\n    if x:\n        return x * 2\n"
+                                     "    return 0\n"}
+    assert mutant_name("_private_util_marker.x_double__mutmut_1", {"calc": {"add"}}) == \
+        "other modules"
+    lines: list[str] = []
+    result = feedback(make_target(tmp_path, {"calc.pyi": "def add(a, b): ...\n"}, src,
+                                  STRONG_TESTS), progress=lines.append)
+    assert result.status == "ok"
+    assert "other modules" in set(result.coverage) | set(result.survivors) | set(result.killed_in)
+    for text in [result.summary, *lines, *result.coverage, *result.survivors, *result.killed_in]:
+        assert "_private_util_marker" not in text
+
+
 # results
 
 def test_weak_suite_reports_coverage_and_mutation_gaps(weak):
@@ -207,6 +223,30 @@ def test_budget_holds_with_many_gaps(tmp_path):
     tests = "import calc\n\n\ndef test_one():\n    calc.function_with_a_long_name_00(1)\n"
     result = feedback(make_target(tmp_path, interface, src, tests), progress=lambda line: None)
     assert len(result.summary) <= SUMMARY_BUDGET and "more)" in result.summary
+
+
+def test_coverage_timeout_is_a_failure_not_a_red_suite(tmp_path):
+    tests = "import time\n\n\ndef test_slow():\n    time.sleep(30)\n"
+    repo = make_target(tmp_path, {"calc.pyi": "def add(a, b): ...\n"},
+                       {"calc.py": "def add(a, b):\n    return a + b\n"}, tests)
+    result = feedback(repo, coverage_timeout=2, progress=lambda line: None)
+    assert result.status == "failed"
+    assert result.summary == "feedback: coverage run timed out after 2s"
+
+
+def test_missing_coverage_report_is_a_failure(tmp_path, monkeypatch):
+    import big_brother.feedback as fb
+    real = fb.run_killable
+
+    def no_json(cmd, *args, **kwargs):
+        return (1, "", False) if "json" in cmd else real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(fb, "run_killable", no_json)
+    repo = make_target(tmp_path, {"calc.pyi": "def add(a, b): ...\n"},
+                       {"calc.py": "def add(a, b):\n    return a + b\n"}, STRONG_TESTS)
+    result = feedback(repo, progress=lambda line: None)
+    assert result.status == "failed"
+    assert result.summary == "feedback: coverage report failed (exit 1)"
 
 
 # preconditions

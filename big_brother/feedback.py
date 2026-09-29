@@ -4,8 +4,9 @@
 directory, runs the suite under branch coverage, then runs mutmut. Results are
 reported only by names the interface declares (`calc.sign`,
 `calc.Counter.bump`). Everything else in a module (helpers, nested functions,
-undeclared classes) is folded into one "<module> (other code)" bucket, so no
-private name reaches the test writer. Line numbers are left out too.
+undeclared classes) is folded into one "<module> (other code)" bucket, and
+modules with no `.pyi` fold into one "other modules" bucket, so no private
+name reaches the test writer. Line numbers are left out too.
 
 The summary is capped at SUMMARY_BUDGET characters and never carries tool
 output, which can quote `src/`. Full output goes to
@@ -43,6 +44,7 @@ from big_brother.red_check import SUMMARY_BUDGET, fit
 from big_brother.runlock import run_lock
 from big_brother.suite_lock import SuiteLock
 
+OTHER_MODULES = "other modules"
 CAUGHT = {"killed", "timeout"}
 SURVIVED = {"survived", "no tests"}
 PROGRESS = re.compile(r"(\d+)/(\d+)")
@@ -98,8 +100,8 @@ def interface_names(interface_dir: Path | str) -> dict[str, set[str]]:
     return names
 
 
-def _other(module: str) -> str:
-    return f"{module} (other code)"
+def _other(module: str, declared: dict[str, set[str]]) -> str:
+    return f"{module} (other code)" if module in declared else OTHER_MODULES
 
 
 def mutant_name(key: str, declared: dict[str, set[str]]) -> str:
@@ -111,8 +113,10 @@ def mutant_name(key: str, declared: dict[str, set[str]]) -> str:
     elif mangled.startswith("x_"):
         qualname = mangled[2:]
     else:
-        return _other(module)
-    return f"{module}.{qualname}" if qualname in declared.get(module, ()) else _other(module)
+        return _other(module, declared)
+    if qualname in declared.get(module, ()):
+        return f"{module}.{qualname}"
+    return _other(module, declared)
 
 
 def run_killable(cmd: list[str], cwd: Path, env: dict, timeout: float,
@@ -157,7 +161,7 @@ def _percent(summary: dict) -> float:
 
 def _coverage(report: dict, declared: dict[str, set[str]], src_dir: str) -> dict[str, float]:
     result: dict[str, float] = {}
-    other: dict[str, Counter] = {}
+    other: dict[str, Counter] = {}  # bucket name -> summed counts
     for path, data in report["files"].items():
         module = _module(Path(path).relative_to(src_dir))
         for qualname, fn in data.get("functions", {}).items():
@@ -166,11 +170,11 @@ def _coverage(report: dict, declared: dict[str, set[str]], src_dir: str) -> dict
             if qualname in declared.get(module, ()):
                 result[f"{module}.{qualname}"] = _percent(fn["summary"])
             else:
-                other.setdefault(module, Counter()).update(
+                other.setdefault(_other(module, declared), Counter()).update(
                     {k: fn["summary"].get(k, 0) for k in
                      ("num_statements", "num_branches", "covered_lines", "covered_branches")})
-    for module, sums in other.items():
-        result[_other(module)] = _percent(sums)
+    for bucket, sums in other.items():
+        result[bucket] = _percent(sums)
     return result
 
 
@@ -253,14 +257,25 @@ def _measure(tmp: Path, env: dict, declared: dict[str, set[str]], log: _Log, tes
              progress: Callable[[str], None]) -> FeedbackResult:
     py = sys.executable
     progress("coverage: running the suite")
-    code, output, _ = run_killable([py, "-m", "coverage", "run", "--branch", f"--source={src_dir}",
-                                    "-m", "pytest", "-q", "-p", "no:cacheprovider", tests_dir],
-                                   tmp, env, coverage_timeout)
+    code, output, timed_out = run_killable([py, "-m", "coverage", "run", "--branch",
+                                            f"--source={src_dir}", "-m", "pytest", "-q",
+                                            "-p", "no:cacheprovider", tests_dir],
+                                           tmp, env, coverage_timeout)
     log.write("coverage run", output)
+    if timed_out:
+        why = f"coverage run timed out after {coverage_timeout:.0f}s"
+        progress(why)
+        return FeedbackResult("failed", f"feedback: {why}")
     if code != 0:
         progress("coverage: suite is not green")
         return FeedbackResult("not_green", "feedback: suite is not green; build first")
-    run_killable([py, "-m", "coverage", "json", "-q", "-o", "coverage.json"], tmp, env, 60)
+    code, output, _ = run_killable([py, "-m", "coverage", "json", "-q", "-o", "coverage.json"],
+                                   tmp, env, 60)
+    if code != 0 or not (tmp / "coverage.json").exists():
+        log.write("coverage json", output)
+        why = f"coverage report failed (exit {code})"
+        progress(why)
+        return FeedbackResult("failed", f"feedback: {why}")
     report = json.loads((tmp / "coverage.json").read_text())
     coverage = _coverage(report, declared, src_dir)
     total_coverage = report["totals"]["percent_covered"]
