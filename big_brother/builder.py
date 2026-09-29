@@ -145,12 +145,18 @@ def parse_reply(text: str, allowed: set[str]) -> tuple[dict[str, str], list[str]
 
 
 def _run_tests(repo: Path, tests_dir: str, src_dir: str, timeout: float,
-               sandbox: bool = True) -> TestRun:
-    """Run the suite in a sandboxed copy of src/ and tests/, reporting paths as the target's."""
+               sandbox: bool = True, src_files: dict[str, str] | None = None) -> TestRun:
+    """Run the suite in a sandboxed copy of src/ and tests/, reporting paths as the target's.
+
+    With `src_files` (target-relative paths), those files stand in for the whole of src/.
+    """
     with tempfile.TemporaryDirectory(prefix="big_brother_build_") as tmp:
         work = Path(tmp) / "work"
         work.mkdir()
-        for d in (src_dir, tests_dir):
+        for rel, body in (src_files or {}).items():
+            (work / rel).parent.mkdir(parents=True, exist_ok=True)
+            (work / rel).write_text(body)
+        for d in (tests_dir,) if src_files is not None else (src_dir, tests_dir):
             if (repo / d).is_dir():
                 shutil.copytree(repo / d, work / d, symlinks=True, copy_function=shutil.copyfile,
                                 ignore=shutil.ignore_patterns("__pycache__"))
