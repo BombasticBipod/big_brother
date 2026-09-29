@@ -1,7 +1,9 @@
 """Tell the test writer where the suite is weak, without showing any implementation.
 
 `feedback` copies the committed `src/` and `tests/` from HEAD into a temporary
-directory, runs the suite under branch coverage, then runs mutmut. Results are
+directory, runs the suite under branch coverage, then runs mutmut. Every run
+executes model-written code, so each one happens inside the bubblewrap sandbox
+(big_brother.sandbox) with only the temporary directory writable. Results are
 reported only by names the interface declares (`calc.sign`,
 `calc.Counter.bump`). Everything else in a module (helpers, nested functions,
 undeclared classes) is folded into one "<module> (other code)" bucket, and
@@ -42,6 +44,7 @@ from pathlib import Path
 from big_brother.builder import DirtySrc
 from big_brother.red_check import SUMMARY_BUDGET, fit
 from big_brother.runlock import run_lock
+from big_brother.sandbox import require_bwrap, sandboxed
 from big_brother.suite_lock import SuiteLock
 
 OTHER_MODULES = "other modules"
@@ -229,6 +232,7 @@ def feedback(repo: Path | str, tests_dir: str = "tests", interface_dir: str = "i
              src_dir: str = "src", coverage_timeout: float = 300, mutation_timeout: float = 1800,
              progress: Callable[[str], None] = print) -> FeedbackResult:
     repo = Path(repo)
+    require_bwrap()
     with run_lock(repo):
         SuiteLock(repo, tests_dir, interface_dir).enforce()
         if _git(repo, "status", "--porcelain", "--untracked-files=all", "--", src_dir).strip():
@@ -246,7 +250,7 @@ def feedback(repo: Path | str, tests_dir: str = "tests", interface_dir: str = "i
             (tmp / "pyproject.toml").write_text(
                 MUTMUT_CONFIG.replace('"src/"', f'"{src_dir}/"').replace('"tests/"', f'"{tests_dir}/"'))
             env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                   "HOME": os.environ.get("HOME", tmp_name),
+                   "HOME": tmp_name,
                    "PYTHONPATH": src_dir, "PYTHONDONTWRITEBYTECODE": "1"}
             return _measure(tmp, env, declared, log, tests_dir, src_dir, coverage_timeout,
                             mutation_timeout, progress)
@@ -256,11 +260,15 @@ def _measure(tmp: Path, env: dict, declared: dict[str, set[str]], log: _Log, tes
              src_dir: str, coverage_timeout: float, mutation_timeout: float,
              progress: Callable[[str], None]) -> FeedbackResult:
     py = sys.executable
+
+    def run(cmd: list[str], timeout: float, on_output: Callable[[str], None] | None = None):
+        return run_killable(sandboxed(cmd, writable=tmp, cwd=tmp), tmp, env, timeout, on_output)
+
     progress("coverage: running the suite")
-    code, output, timed_out = run_killable([py, "-m", "coverage", "run", "--branch",
+    code, output, timed_out = run([py, "-m", "coverage", "run", "--branch",
                                             f"--source={src_dir}", "-m", "pytest", "-q",
                                             "-p", "no:cacheprovider", tests_dir],
-                                           tmp, env, coverage_timeout)
+                                           coverage_timeout)
     log.write("coverage run", output)
     if timed_out:
         why = f"coverage run timed out after {coverage_timeout:.0f}s"
@@ -269,8 +277,7 @@ def _measure(tmp: Path, env: dict, declared: dict[str, set[str]], log: _Log, tes
     if code != 0:
         progress("coverage: suite is not green")
         return FeedbackResult("not_green", "feedback: suite is not green; build first")
-    code, output, _ = run_killable([py, "-m", "coverage", "json", "-q", "-o", "coverage.json"],
-                                   tmp, env, 60)
+    code, output, _ = run([py, "-m", "coverage", "json", "-q", "-o", "coverage.json"], 60)
     if code != 0 or not (tmp / "coverage.json").exists():
         log.write("coverage json", output)
         why = f"coverage report failed (exit {code})"
@@ -282,14 +289,14 @@ def _measure(tmp: Path, env: dict, declared: dict[str, set[str]], log: _Log, tes
     progress(f"coverage: {total_coverage:.0f}%")
 
     progress("mutation: generating mutants")
-    code, output, timed_out = run_killable([py, "-m", "mutmut", "run"], tmp, env,
+    code, output, timed_out = run([py, "-m", "mutmut", "run"],
                                            mutation_timeout, _MutationProgress(progress))
     log.write("mutmut run", output[-20000:])
     if code != 0:
         why = f"timed out after {mutation_timeout:.0f}s" if timed_out else f"failed (exit {code})"
         progress(f"mutation: {why}")
         return FeedbackResult("failed", f"feedback: mutation run {why}", total_coverage, coverage)
-    code, output, _ = run_killable([py, "-m", "mutmut", "results", "--all", "true"], tmp, env, 120)
+    code, output, _ = run([py, "-m", "mutmut", "results", "--all", "true"], 120)
     log.write("mutmut results", output)
     survivors: Counter = Counter()
     killed_in: Counter = Counter()

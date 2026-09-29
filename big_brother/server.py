@@ -52,6 +52,7 @@ from big_brother.ledger import Ledger, LedgerError
 from big_brother.ollama import OllamaClient, OllamaError, ollama_on_demand
 from big_brother.red_check import SUMMARY_BUDGET, _clip
 from big_brother.runlock import BuildBusy
+from big_brother.sandbox import SandboxUnavailable, require_bwrap
 from big_brother.staging import Staging, StagingError
 from big_brother.suite_lock import NotLocked, TestsTampered
 
@@ -59,7 +60,7 @@ INTERFACE_BUDGET = 8000    # characters of one .pyi returned by get_interface
 ERROR_BUDGET = 400         # the SDK prefixes "Error executing tool <name>: "
 MODULE = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
 REFUSALS = (StagingError, LedgerError, BuildBusy, TestsTampered, DirtySrc, NotLocked,
-            OllamaError, ValueError)
+            OllamaError, SandboxUnavailable, ValueError)
 
 INSTRUCTIONS = """You write pytest tests for a project whose implementation you never see.
 Cycle: next_requirement, get_interface, propose_interface if the interface needs a change,
@@ -192,6 +193,7 @@ def make_server(repo: Path | str, model: Model | None = None,
     def build(max_tries: int = 5) -> str:
         """Let the local model implement src/ until the locked suite is green or tries run out."""
         try:
+            require_bwrap()        # before starting the model for a build that cannot run
             ensure_model()
             result = run_build(repo, model, max_tries=max_tries, tests_dir=tests_dir,
                                interface_dir=interface_dir,

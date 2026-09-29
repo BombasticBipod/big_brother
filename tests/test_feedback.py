@@ -11,6 +11,7 @@ from big_brother.builder import DirtySrc
 from big_brother.feedback import (SUMMARY_BUDGET, FeedbackResult, feedback, feedback_log_path,
                                   interface_names, main, mutant_name, run_killable)
 from big_brother.runlock import BuildBusy, run_lock
+from big_brother.sandbox import SandboxUnavailable
 from big_brother.suite_lock import SuiteLock, TestsTampered
 
 INTERFACE = {
@@ -292,6 +293,44 @@ def test_refused_while_a_build_runs(tmp_path):
     with run_lock(repo):
         with pytest.raises(BuildBusy):
             feedback(repo, progress=lambda line: None)
+
+
+# sandbox
+
+def test_the_suite_runs_sandboxed_away_from_the_target_home_and_network(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home_file = Path.home() / "big_brother_feedback_marker"
+    home_file.unlink(missing_ok=True)  # left over if a run ever escaped
+    tests = STRONG_TESTS + f"""
+
+def test_escape():
+    import pathlib, socket
+    for path in ({str(outside / 'planted.txt')!r}, {str(home_file)!r}):
+        try:
+            pathlib.Path(path).write_text("planted")
+        except OSError:
+            pass
+    try:
+        socket.create_connection(("1.1.1.1", 53), timeout=3)
+        raise SystemExit("network reachable")
+    except OSError:
+        pass
+"""
+    repo = make_target(tmp_path / "target", {"calc.pyi": "def add(a, b): ...\n"},
+                       {"calc.py": "def add(a, b):\n    return a + b\n"}, tests)
+    result = feedback(repo, progress=lambda line: None)
+    assert result.status == "ok", result.summary
+    assert not (outside / "planted.txt").exists() and not home_file.exists()
+
+
+def test_feedback_without_bubblewrap_refuses_to_run(tmp_path, monkeypatch):
+    from big_brother import sandbox
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
+    repo = make_target(tmp_path, {"calc.pyi": "def add(a, b): ...\n"},
+                       {"calc.py": "def add(a, b):\n    return a + b\n"}, STRONG_TESTS)
+    with pytest.raises(SandboxUnavailable):
+        feedback(repo, progress=lambda line: None)
 
 
 # process control
