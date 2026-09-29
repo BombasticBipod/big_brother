@@ -1,5 +1,6 @@
 """The MCP server gives the test writer short results and never shows it implementation text."""
 import contextlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -10,7 +11,9 @@ from mcp import Client
 
 from big_brother.ledger import Ledger
 from big_brother.red_check import SUMMARY_BUDGET
+from big_brother.reference import reference_log_path
 from big_brother.server import builder_from_spec, INTERFACE_BUDGET, make_server, progress_path
+from big_brother.server import main as server_main
 from big_brother.staging import Staging, staging_path
 from big_brother.suite_lock import SuiteLock
 
@@ -328,3 +331,97 @@ def test_builder_spec_picks_the_model_and_its_on_demand():
     assert model.model == "claude-sonnet-5-5"
     with on_demand():
         pass
+
+
+# reference answers from the test writer
+
+REF_GOOD = {"src/calc.py": "def add(a, b):\n    return a + b  # REFERENCE_SENTINEL\n"}
+
+
+def with_reference(target: Path, mode: str, *replies: str):
+    return make_server(target, model=FakeModel(*(replies or (GOOD,))), on_demand=no_ollama,
+                       reference=mode)
+
+
+def committed_with(target: Path, mode: str, *replies: str):
+    server = with_reference(target, mode, *replies)
+    call(server, "propose_test", path="tests/test_add.py", content=TEST_ADD)
+    commit = call(server, "commit_tests", message="test add", requirement_id=1)
+    return server, commit
+
+
+def test_an_unknown_reference_mode_is_refused_before_anything_starts(target):
+    with pytest.raises(ValueError, match="none, stuck, all"):
+        with_reference(target, "sometimes")
+    with pytest.raises(SystemExit):
+        server_main([str(target), "--reference", "sometimes"])
+
+
+def test_submit_reference_is_offered_only_when_a_mode_asks_for_it(target):
+    assert "submit_reference" not in tool_names(with_reference(target, "none"))
+    assert "submit_reference" in tool_names(with_reference(target, "stuck"))
+    assert "submit_reference" in tool_names(with_reference(target, "all"))
+
+
+def test_stuck_mode_asks_for_a_reference_only_after_a_stuck_build(target):
+    server, (_, commit) = committed_with(target, "stuck", BAD)
+    assert "submit_reference" not in commit
+    error, _ = call(server, "submit_reference", requirement_id=1, files=REF_GOOD)
+    assert error
+    _, built = call(server, "build", max_tries=1)
+    assert built.startswith("stuck") and "submit_reference" in built and "1" in built
+    error, text = call(server, "submit_reference", requirement_id=1, files=REF_GOOD)
+    assert (error, text) == (False, "reference green: 1 tests pass")
+    [rec] = [json.loads(l) for l in reference_log_path(target).read_text().splitlines()]
+    assert rec["trigger"] == "stuck" and rec["requirement_id"] == 1
+
+
+def test_all_mode_asks_for_a_reference_after_every_commit(target):
+    error, text = call(with_reference(target, "all"), "submit_reference",
+                       requirement_id=1, files=REF_GOOD)
+    assert error                               # still open: no tests yet
+    server, (_, commit) = committed_with(target, "all")
+    assert "submit_reference" in commit
+    error, text = call(server, "submit_reference", requirement_id=1, files=REF_GOOD)
+    assert (error, text) == (False, "reference green: 1 tests pass")
+    assert call(server, "submit_reference", requirement_id=99, files=REF_GOOD)[0]
+
+
+def test_none_mode_never_asks(target):
+    server, (_, commit) = committed_with(target, "none", BAD)
+    assert "submit_reference" not in commit
+    assert "submit_reference" not in call(server, "build", max_tries=1)[1]
+
+
+def test_the_reference_hint_survives_a_long_stuck_summary(target):
+    many = "from calc import add\n\n" + "".join(
+        f"\ndef test_{'long_name_' * 4}{i}():\n    assert add({i}, 1) == {i + 1}\n"
+        for i in range(40))
+    server = with_reference(target, "stuck", BAD)
+    call(server, "propose_test", path="tests/test_add.py", content=many)
+    call(server, "commit_tests", message="many", requirement_id=1)
+    _, built = call(server, "build", max_tries=1)
+    assert "submit_reference" in built and len(built) <= SUMMARY_BUDGET
+
+
+class RecordingModel(FakeModel):
+    def __init__(self, *replies: str):
+        super().__init__(*replies)
+        self.seen = []
+
+    def chat(self, messages):
+        self.seen.append(messages)
+        return super().chat(messages)
+
+
+def test_the_builder_never_sees_a_reference(target):
+    model = RecordingModel(BAD, BAD)
+    server = make_server(target, model=model, on_demand=no_ollama, reference="stuck")
+    call(server, "propose_test", path="tests/test_add.py", content=TEST_ADD)
+    call(server, "commit_tests", message="t", requirement_id=1)
+    call(server, "build", max_tries=1)
+    assert not call(server, "submit_reference", requirement_id=1, files=REF_GOOD)[0]
+    assert git(target, "status", "--porcelain", "--untracked-files=all") == ""
+    call(server, "build", max_tries=1)
+    assert len(model.seen) == 2
+    assert all("REFERENCE_SENTINEL" not in m["content"] for msgs in model.seen for m in msgs)
