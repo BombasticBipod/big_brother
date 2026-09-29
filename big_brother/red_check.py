@@ -15,6 +15,14 @@ The overall status is `broken` if any test is broken or none ran, else
 `passes_on_stubs` if any test passed, else `red`. `summary` is a short text
 for the test writer, capped at SUMMARY_BUDGET characters.
 
+`overlay`, when given, is a directory of staged files laid over the target's:
+its `interface/` and `tests/` files are added to, or replace, the committed
+ones in the throwaway copy. The target itself is never written.
+
+A symlink anywhere in the interface or tests (committed or staged) makes the
+check broken before anything is copied, because copying follows symlinks and
+one pointing into `src/` would carry real source into the check.
+
 Red against stubs is expected for any test that calls the interface, even when
 the real implementation already satisfies it. Only a build shows whether a
 new test asks for new behavior.
@@ -62,6 +70,31 @@ def _check_paths(tests_dir: str, paths: list[str]) -> None:
         parts = PurePosixPath(p).parts
         if not parts or parts[0] != tests_dir or ".." in parts or PurePosixPath(p).is_absolute():
             raise ValueError(f"{p} is not inside {tests_dir}/")
+
+
+def _symlink(roots: list[Path]) -> Path | None:
+    """The first symlink at or under any root, or None."""
+    for root in roots:
+        if root.is_symlink():
+            return root
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in dirnames + filenames:
+                if Path(dirpath, name).is_symlink():
+                    return Path(dirpath, name)
+    return None
+
+
+def _layer(sources: list[Path], dest: Path) -> None:
+    """Copy each existing source tree into dest in order, later files replacing earlier ones."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for src in sources:
+        if src.is_dir():
+            shutil.copytree(src, dest, copy_function=shutil.copyfile, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+    for d, _, _ in os.walk(dest):  # a locked suite copies read-only dirs
+        os.chmod(d, 0o755)
 
 
 def _verdict(entry: dict) -> str:
@@ -118,19 +151,23 @@ def _summarize(status: str, tests: list[TestOutcome], note: str = "") -> str:
 
 
 def red_check(repo: Path | str, test_paths: list[str], interface_dir: str = "interface",
-              tests_dir: str = "tests", timeout: float = 120) -> RedResult:
+              tests_dir: str = "tests", timeout: float = 120,
+              overlay: Path | str | None = None) -> RedResult:
     repo = Path(repo)
     _check_paths(tests_dir, test_paths)
+    layers = [repo] + ([Path(overlay)] if overlay is not None else [])
+    link = _symlink([layer / d for layer in layers for d in (interface_dir, tests_dir)])
+    if link is not None:
+        return RedResult("broken", [], _summarize("broken", [], f"symlink in suite: {link.name}"))
     with tempfile.TemporaryDirectory(prefix="big_brother_red_") as tmp_name:
         tmp = Path(tmp_name)
+        _layer([layer / interface_dir for layer in layers], tmp / interface_dir)
         try:
-            make_stubs(repo / interface_dir, tmp / "stubs")
+            make_stubs(tmp / interface_dir, tmp / "stubs")
         except InterfaceError as err:
             return RedResult("broken", [], _summarize("broken", [], f"interface: {err}"))
-        shutil.copytree(repo / tests_dir, tmp / tests_dir, copy_function=shutil.copyfile,
-                        ignore=shutil.ignore_patterns("__pycache__"))
-        for d, _, _ in os.walk(tmp / tests_dir):  # a locked suite copies read-only dirs
-            os.chmod(d, 0o755)
+        shutil.rmtree(tmp / interface_dir)
+        _layer([layer / tests_dir for layer in layers], tmp / tests_dir)
         (tmp / "pytest.ini").write_text("[pytest]\n")
         out = tmp / "records.jsonl"
         env = {

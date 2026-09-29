@@ -181,3 +181,48 @@ def test_missing_test_file_is_broken_with_pytest_reason(project):
     r = red_check(project, ["tests/test_missing.py"])
     assert r.status == "broken"
     assert "not found" in r.summary
+
+
+# staged files and symlinks
+
+def test_overlay_adds_staged_tests_and_interface(project, tmp_path):
+    staged = tmp_path / "staged"
+    write(staged, {
+        "interface/shapes.pyi": "def area(w: int, h: int) -> int: ...\n",
+        "tests/test_area.py": "from shapes import area\ndef test_area():\n    assert area(2, 3) == 6\n",
+    })
+    r = red_check(project, ["tests/test_area.py"], overlay=staged)
+    assert r.status == "red", r.summary
+    assert not (project / "tests").exists() and not (project / "interface" / "shapes.pyi").exists()
+
+
+def test_overlay_replaces_a_committed_test(project, tmp_path):
+    write(project, {"tests/test_add.py": "def test_add():\n    pass\n"})
+    staged = tmp_path / "staged"
+    write(staged, {"tests/test_add.py": "from calc import add\ndef test_add():\n    assert add(1, 1) == 2\n"})
+    assert red_check(project, ["tests/test_add.py"], overlay=staged).status == "red"
+    assert red_check(project, ["tests/test_add.py"]).status == "passes_on_stubs"
+
+
+def test_a_symlink_in_tests_is_broken_and_never_followed(project):
+    write(project, {"tests/test_add.py": "from calc import add\ndef test_add():\n    assert add(2, 3) == 5\n"})
+    (project / "tests" / "leak.py").symlink_to(project / "src" / "secret.py")
+    r = red_check(project, ["tests/test_add.py"])
+    assert r.status == "broken"
+    assert "symlink" in r.summary and "REAL-SOURCE" not in r.summary
+
+
+def test_a_symlinked_tests_dir_is_broken(project, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    write(elsewhere, {"test_add.py": "from calc import add\ndef test_add():\n    assert add(2, 3) == 5\n"})
+    (project / "tests").symlink_to(elsewhere)
+    r = red_check(project, ["tests/test_add.py"])
+    assert r.status == "broken" and "symlink" in r.summary
+
+
+def test_a_symlink_in_the_overlay_is_broken(project, tmp_path):
+    staged = tmp_path / "staged"
+    write(staged, {"tests/test_add.py": "from calc import add\ndef test_add():\n    assert add(2, 3) == 5\n"})
+    (staged / "tests" / "leak.py").symlink_to(project / "src" / "secret.py")
+    r = red_check(project, ["tests/test_add.py"], overlay=staged)
+    assert r.status == "broken" and "symlink" in r.summary
