@@ -265,3 +265,25 @@ def test_a_session_without_builds_never_starts_ollama(target):
 
     call(make_server(target, model=FakeModel(GOOD), on_demand=counting), "next_requirement")
     assert events == []
+
+
+# sandbox
+
+def test_without_bubblewrap_tools_refuse_cleanly_and_nothing_is_left_behind(target, monkeypatch):
+    from big_brother import sandbox
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
+    started = []
+
+    @contextlib.contextmanager
+    def track():
+        started.append(True)
+        yield
+
+    server = make_server(target, model=FakeModel(GOOD), on_demand=track)
+    error, text = call(server, "propose_test", path="tests/test_add.py", content=TEST_ADD)
+    assert error and "install bubblewrap" in text
+    assert Staging(target).paths() == []
+    for tool in ("build", "feedback"):
+        error, text = call(server, tool)
+        assert error and "install bubblewrap" in text
+    assert started == []

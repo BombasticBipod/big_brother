@@ -30,6 +30,7 @@ from pathlib import Path, PurePosixPath
 
 from big_brother.red_check import RedResult, _summarize, red_check
 from big_brother.runlock import run_lock
+from big_brother.sandbox import require_bwrap
 from big_brother.stubs import InterfaceError, make_stubs
 from big_brother.suite_lock import SuiteLock
 
@@ -85,6 +86,7 @@ class Staging:
     def propose(self, path: str, content: str) -> RedResult:
         """Stage one file and return the check of everything staged."""
         rel = self._validate(path, content)
+        require_bwrap()            # a file staged but never checked would block every build
         with run_lock(self.repo):
             target = self.root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
