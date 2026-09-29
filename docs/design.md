@@ -74,14 +74,18 @@ Each requirement is **open** (no tests yet), **tested** (tests committed; `suite
 
 ## MCP server
 
-Claude Code is the only MCP client. The builder is a backend job the server runs. Tools:
+Claude Code is the only MCP client. The builder is a backend job the server runs. `big_brother/server.py` uses the `mcp` Python SDK 2.x (`MCPServer`) over stdio: `python -m big_brother.server TARGET`. `scripts/register_mcp.sh TARGET` adds it to the target's `.mcp.json` with `claude mcp add --scope project`. Tools:
 
-- `next_requirement()` returns the next open ledger item.
-- `get_interface(module)` returns the stubs.
-- `propose_test(path, content)` writes to `tests/` only, runs the red check against stubs, returns "fails correctly" or the error.
-- `commit_tests(message)` commits the suite and marks it ready.
-- `build(max_tries)` runs the builder loop and returns a compact "green" or "stuck" with the failing test and a short error.
-- `feedback()` runs coverage and mutmut and returns only gaps and surviving mutants.
+- `next_requirement()` returns the next ledger item: tested (possibly stuck) before open.
+- `get_interface(module)` returns a module's `.pyi`, staged version first, capped at 8,000 characters. An empty name lists the modules. Only dotted module names are accepted.
+- `propose_test(path, content)` stages a file under `tests/` only and returns the check of everything staged ("red: N tests fail correctly", "passes_on_stubs: ..." or "broken: ...").
+- `propose_interface(path, content)` does the same for `interface/**/*.pyi`.
+- `discard_staged()` drops every staged file.
+- `commit_tests(message, requirement_id)` commits the staged files through the suite lock and marks the requirement tested. An unknown or done requirement is refused before anything is committed.
+- `build(max_tries)` starts Ollama on demand, runs the builder loop and returns its summary. Green marks every tested requirement done at the new commit; stuck counts against each of them.
+- `feedback()` returns the coverage and mutation summary.
+
+Refusals are tool errors (`is_error`), clipped to 400 characters, so the writer reads them and retries. Results stay within the 500-character summary budget, except `get_interface`. Stdout carries the protocol, so build and feedback progress (counts only) goes to `.git/big_brother/progress.log` for the user to `tail -f`. Stdio servers have no per-call timeout in Claude Code (the default wall-clock limit is about 28 hours), so `build` and `feedback` run synchronously.
 
 Claude Code's cycle: pick a requirement, write a test, confirm red, commit, build, read a few lines of feedback, write the next test. Every tool result is a few lines.
 
@@ -92,11 +96,11 @@ Claude Code's cycle: pick a requirement, write a test, confirm red, commit, buil
 3. Builder loop: pytest plus Ollama, max tries, green or stuck result. (Done.)
 4. Feedback: coverage and mutmut summaries under a size budget. (Done.)
 5. Requirements ledger in SQLite. (Done.)
-6. MCP server wrapping all of it, with permission tests (writes outside the allowed directory are rejected, results stay under budget).
+6. MCP server wrapping all of it, with permission tests (writes outside the allowed directory are rejected, results stay under budget). (Done.)
 7. End to end on one toy requirement.
 8. Claude Code permission settings denying reads of the target's `src/` and of everything under `.git/big_brother/` (`build.log`, `feedback.log` and any later log), since those logs quote implementation text.
 
 ## Operating rules
 
-- Ollama is started once per build run and stopped at the end, never left always-on (see the user's ollama-on-demand preference).
+- Ollama is started once per run and stopped at its end, never left always-on and never restarted per step (see the user's ollama-on-demand preference). For the command-line builder a run is one build; for the MCP server it is the whole session: the first `build` starts Ollama and the session's end stops it.
 - Everything is test-driven with pytest and tracked in git.
