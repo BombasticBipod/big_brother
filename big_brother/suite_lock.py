@@ -62,6 +62,7 @@ class SuiteLock:
         self.dirs = [tests_dir, interface_dir]
         git_dir = Path(_git(self.repo, "rev-parse", "--absolute-git-dir").strip())
         self._state_file = git_dir / "big_brother" / "suite_lock.json"
+        self._pinned: str | None = None
 
     # state
 
@@ -79,10 +80,29 @@ class SuiteLock:
 
     @property
     def base(self) -> str:
+        if self._pinned is not None:
+            return self._pinned
         try:
             return self._state()[self.tests_dir]
         except KeyError:
             raise NotLocked(f"{self.tests_dir}/ is not locked") from None
+
+    def pin(self) -> None:
+        """Hold the locked commit in memory, so rewriting the state file cannot move it.
+
+        A build pins its lock: code under build runs with the user's permissions
+        and could otherwise commit a test change and point the state at it.
+        """
+        self._pinned = None
+        self._pinned = self.base
+
+    def _state_moved(self) -> bool:
+        if self._pinned is None:
+            return False
+        if self._state().get(self.tests_dir) != self._pinned:
+            self._save_base(self._pinned)
+            return True
+        return False
 
     def is_locked(self) -> bool:
         return self.tests_dir in self._state()
@@ -146,8 +166,11 @@ class SuiteLock:
         return changed
 
     def enforce(self) -> None:
-        """Raise TestsTampered after reverting, if the locked suite changed."""
+        """Raise TestsTampered after reverting, if the locked suite or a pinned state changed."""
+        moved = self._state_moved()
         changed = self.revert()
+        if moved:
+            changed.append(str(self._state_file.relative_to(self.repo)))
         if changed:
             raise TestsTampered(changed)
 

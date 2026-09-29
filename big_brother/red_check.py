@@ -93,8 +93,8 @@ def _layer(sources: list[Path], dest: Path) -> None:
         if src.is_dir():
             shutil.copytree(src, dest, copy_function=shutil.copyfile, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns("__pycache__"))
-    for d, _, _ in os.walk(dest):  # a locked suite copies read-only dirs
-        os.chmod(d, 0o755)
+        for d, _, _ in os.walk(dest):  # a locked suite copies read-only dirs
+            os.chmod(d, 0o755)
 
 
 def _verdict(entry: dict) -> str:
